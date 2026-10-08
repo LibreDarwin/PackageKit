@@ -10,3 +10,5 @@ xcuserdata/
 *.xcworkspace
 __pycache__/
 *.pyc
+*.profraw
+*.profdata
