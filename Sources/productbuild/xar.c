@@ -19,7 +19,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <zlib.h>
-#include <openssl/evp.h>
+#include <CommonCrypto/CommonDigest.h>
 
 #include "xar.h"
 
@@ -133,7 +133,7 @@ static void
 sha1_hex(const void *data, size_t len, char out[41])
 {
 	unsigned char digest[20];
-	EVP_Digest(data, len, digest, NULL, EVP_sha1(), NULL);
+	CC_SHA1(data, (CC_LONG)len, digest);
 	static const char hex[] = "0123456789abcdef";
 	for (int i = 0; i < 20; i++) {
 		out[i * 2] = hex[digest[i] >> 4];
@@ -291,7 +291,7 @@ xar_build(const struct xar_entry *entries, int n, size_t *out_len)
 		goto fail_toc;
 
 	unsigned char chk[20];
-	EVP_Digest(toc_z, toc_z_len, chk, NULL, EVP_sha1(), NULL);
+	CC_SHA1(toc_z, (CC_LONG)toc_z_len, chk);
 
 	size_t arch_len = 28 + toc_z_len + 20 + heap_off - 20;
 	unsigned char *arch = malloc(arch_len);

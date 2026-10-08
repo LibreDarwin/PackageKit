@@ -1,0 +1,356 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		AB5C1D000000000000000021 /* pkgbuild.c in Sources */ = {isa = PBXBuildFile; fileRef = AB5C1D000000000000000011 /* pkgbuild.c */; };
+		AB5C1D000000000000000022 /* analyze.c in Sources */ = {isa = PBXBuildFile; fileRef = AB5C1D000000000000000012 /* analyze.c */; };
+		AB5C1D000000000000000023 /* bom.c in Sources */ = {isa = PBXBuildFile; fileRef = AB5C1D000000000000000014 /* bom.c */; };
+		AB5C1D000000000000000024 /* payload.c in Sources */ = {isa = PBXBuildFile; fileRef = AB5C1D000000000000000016 /* payload.c */; };
+		AB5C1D000000000000000025 /* xar.c in Sources */ = {isa = PBXBuildFile; fileRef = AB5C1D000000000000000018 /* xar.c */; };
+		AB5C1D000000000000000031 /* productbuild.c in Sources */ = {isa = PBXBuildFile; fileRef = AB5C1D000000000000000071 /* productbuild.c */; };
+		AB5C1D000000000000000032 /* analyze.c in Sources */ = {isa = PBXBuildFile; fileRef = AB5C1D000000000000000072 /* analyze.c */; };
+		AB5C1D000000000000000033 /* bom.c in Sources */ = {isa = PBXBuildFile; fileRef = AB5C1D000000000000000074 /* bom.c */; };
+		AB5C1D000000000000000034 /* dist.c in Sources */ = {isa = PBXBuildFile; fileRef = AB5C1D000000000000000076 /* dist.c */; };
+		AB5C1D000000000000000035 /* payload.c in Sources */ = {isa = PBXBuildFile; fileRef = AB5C1D000000000000000078 /* payload.c */; };
+		AB5C1D000000000000000036 /* xar.c in Sources */ = {isa = PBXBuildFile; fileRef = AB5C1D00000000000000007A /* xar.c */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		AB5C1D000000000000000011 /* pkgbuild.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = pkgbuild.c; sourceTree = "<group>"; };
+		AB5C1D000000000000000012 /* analyze.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = analyze.c; sourceTree = "<group>"; };
+		AB5C1D000000000000000013 /* analyze.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = analyze.h; sourceTree = "<group>"; };
+		AB5C1D000000000000000014 /* bom.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = bom.c; sourceTree = "<group>"; };
+		AB5C1D000000000000000015 /* bom.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = bom.h; sourceTree = "<group>"; };
+		AB5C1D000000000000000016 /* payload.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = payload.c; sourceTree = "<group>"; };
+		AB5C1D000000000000000017 /* payload.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = payload.h; sourceTree = "<group>"; };
+		AB5C1D000000000000000018 /* xar.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = xar.c; sourceTree = "<group>"; };
+		AB5C1D000000000000000019 /* xar.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = xar.h; sourceTree = "<group>"; };
+		AB5C1D00000000000000001A /* pkgbuild */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = pkgbuild; sourceTree = BUILT_PRODUCTS_DIR; };
+		AB5C1D000000000000000071 /* productbuild.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = productbuild.c; sourceTree = "<group>"; };
+		AB5C1D000000000000000072 /* analyze.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = analyze.c; sourceTree = "<group>"; };
+		AB5C1D000000000000000073 /* analyze.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = analyze.h; sourceTree = "<group>"; };
+		AB5C1D000000000000000074 /* bom.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = bom.c; sourceTree = "<group>"; };
+		AB5C1D000000000000000075 /* bom.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = bom.h; sourceTree = "<group>"; };
+		AB5C1D000000000000000076 /* dist.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = dist.c; sourceTree = "<group>"; };
+		AB5C1D000000000000000077 /* dist.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = dist.h; sourceTree = "<group>"; };
+		AB5C1D000000000000000078 /* payload.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = payload.c; sourceTree = "<group>"; };
+		AB5C1D000000000000000079 /* payload.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = payload.h; sourceTree = "<group>"; };
+		AB5C1D00000000000000007A /* xar.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = xar.c; sourceTree = "<group>"; };
+		AB5C1D00000000000000007B /* xar.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = xar.h; sourceTree = "<group>"; };
+		AB5C1D00000000000000007C /* productbuild */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = productbuild; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		AB5C1D000000000000000043 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AB5C1D000000000000000053 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		AB5C1D000000000000000002 = {
+			isa = PBXGroup;
+			children = (
+				AB5C1D000000000000000004 /* Sources */,
+				AB5C1D000000000000000003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		AB5C1D000000000000000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				AB5C1D00000000000000001A /* pkgbuild */,
+				AB5C1D00000000000000007C /* productbuild */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		AB5C1D000000000000000004 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				AB5C1D000000000000000005 /* pkgbuild */,
+				AB5C1D000000000000000006 /* productbuild */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		AB5C1D000000000000000005 /* pkgbuild */ = {
+			isa = PBXGroup;
+			children = (
+				AB5C1D000000000000000011 /* pkgbuild.c */,
+				AB5C1D000000000000000012 /* analyze.c */,
+				AB5C1D000000000000000013 /* analyze.h */,
+				AB5C1D000000000000000014 /* bom.c */,
+				AB5C1D000000000000000015 /* bom.h */,
+				AB5C1D000000000000000016 /* payload.c */,
+				AB5C1D000000000000000017 /* payload.h */,
+				AB5C1D000000000000000018 /* xar.c */,
+				AB5C1D000000000000000019 /* xar.h */,
+			);
+			path = pkgbuild;
+			sourceTree = "<group>";
+		};
+		AB5C1D000000000000000006 /* productbuild */ = {
+			isa = PBXGroup;
+			children = (
+				AB5C1D000000000000000071 /* productbuild.c */,
+				AB5C1D000000000000000072 /* analyze.c */,
+				AB5C1D000000000000000073 /* analyze.h */,
+				AB5C1D000000000000000074 /* bom.c */,
+				AB5C1D000000000000000075 /* bom.h */,
+				AB5C1D000000000000000076 /* dist.c */,
+				AB5C1D000000000000000077 /* dist.h */,
+				AB5C1D000000000000000078 /* payload.c */,
+				AB5C1D000000000000000079 /* payload.h */,
+				AB5C1D00000000000000007A /* xar.c */,
+				AB5C1D00000000000000007B /* xar.h */,
+			);
+			path = productbuild;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		AB5C1D000000000000000041 /* pkgbuild */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AB5C1D000000000000000044 /* Build configuration list for PBXNativeTarget "pkgbuild" */;
+			buildPhases = (
+				AB5C1D000000000000000042 /* Sources */,
+				AB5C1D000000000000000043 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = pkgbuild;
+			productName = pkgbuild;
+			productReference = AB5C1D00000000000000001A /* pkgbuild */;
+			productType = "com.apple.product-type.tool";
+		};
+		AB5C1D000000000000000051 /* productbuild */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AB5C1D000000000000000054 /* Build configuration list for PBXNativeTarget "productbuild" */;
+			buildPhases = (
+				AB5C1D000000000000000052 /* Sources */,
+				AB5C1D000000000000000053 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = productbuild;
+			productName = productbuild;
+			productReference = AB5C1D00000000000000007C /* productbuild */;
+			productType = "com.apple.product-type.tool";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		AB5C1D000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1600;
+			};
+			buildConfigurationList = AB5C1D000000000000000061 /* Build configuration list for PBXProject "PackageKit" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				base,
+			);
+			mainGroup = AB5C1D000000000000000002;
+			productRefGroup = AB5C1D000000000000000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				AB5C1D000000000000000041 /* pkgbuild */,
+				AB5C1D000000000000000051 /* productbuild */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		AB5C1D000000000000000042 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AB5C1D000000000000000021 /* pkgbuild.c in Sources */,
+				AB5C1D000000000000000022 /* analyze.c in Sources */,
+				AB5C1D000000000000000023 /* bom.c in Sources */,
+				AB5C1D000000000000000024 /* payload.c in Sources */,
+				AB5C1D000000000000000025 /* xar.c in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AB5C1D000000000000000052 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AB5C1D000000000000000031 /* productbuild.c in Sources */,
+				AB5C1D000000000000000032 /* analyze.c in Sources */,
+				AB5C1D000000000000000033 /* bom.c in Sources */,
+				AB5C1D000000000000000034 /* dist.c in Sources */,
+				AB5C1D000000000000000035 /* payload.c in Sources */,
+				AB5C1D000000000000000036 /* xar.c in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		AB5C1D000000000000000045 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				EXECUTABLE_PREFIX = "";
+				GCC_C_LANGUAGE_STANDARD = c11;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/Sources/pkgbuild";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				OTHER_CFLAGS = (
+					"-D_DARWIN_C_SOURCE",
+					"-Wall",
+					"-Wextra",
+				);
+				OTHER_LDFLAGS = (
+					"-lz",
+				);
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = Debug;
+		};
+		AB5C1D000000000000000046 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				EXECUTABLE_PREFIX = "";
+				GCC_C_LANGUAGE_STANDARD = c11;
+				GCC_OPTIMIZATION_LEVEL = 3;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/Sources/pkgbuild";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				OTHER_CFLAGS = (
+					"-D_DARWIN_C_SOURCE",
+					"-Wall",
+					"-Wextra",
+				);
+				OTHER_LDFLAGS = (
+					"-lz",
+				);
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = Release;
+		};
+		AB5C1D000000000000000055 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				EXECUTABLE_PREFIX = "";
+				GCC_C_LANGUAGE_STANDARD = c11;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/Sources/productbuild";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				OTHER_CFLAGS = (
+					"-D_DARWIN_C_SOURCE",
+					"-Wall",
+					"-Wextra",
+				);
+				OTHER_LDFLAGS = (
+					"-lz",
+				);
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = Debug;
+		};
+		AB5C1D000000000000000056 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				EXECUTABLE_PREFIX = "";
+				GCC_C_LANGUAGE_STANDARD = c11;
+				GCC_OPTIMIZATION_LEVEL = 3;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/Sources/productbuild";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				OTHER_CFLAGS = (
+					"-D_DARWIN_C_SOURCE",
+					"-Wall",
+					"-Wextra",
+				);
+				OTHER_LDFLAGS = (
+					"-lz",
+				);
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = Release;
+		};
+		AB5C1D000000000000000062 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CONFIGURATION_BUILD_DIR = "$(SRCROOT)/build/debug";
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				OBJROOT = "$(SRCROOT)/build/obj/debug";
+				SDKROOT = macosx;
+				SYMROOT = "$(SRCROOT)/build";
+			};
+			name = Debug;
+		};
+		AB5C1D000000000000000063 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CONFIGURATION_BUILD_DIR = "$(SRCROOT)/build/release";
+				GCC_OPTIMIZATION_LEVEL = 3;
+				OBJROOT = "$(SRCROOT)/build/obj/release";
+				SDKROOT = macosx;
+				SYMROOT = "$(SRCROOT)/build";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		AB5C1D000000000000000044 /* Build configuration list for PBXNativeTarget "pkgbuild" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AB5C1D000000000000000045 /* Debug */,
+				AB5C1D000000000000000046 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AB5C1D000000000000000054 /* Build configuration list for PBXNativeTarget "productbuild" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AB5C1D000000000000000055 /* Debug */,
+				AB5C1D000000000000000056 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AB5C1D000000000000000061 /* Build configuration list for PBXProject "PackageKit" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AB5C1D000000000000000062 /* Debug */,
+				AB5C1D000000000000000063 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = AB5C1D000000000000000001 /* Project object */;
+}
