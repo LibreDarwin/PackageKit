@@ -31,6 +31,7 @@
 #include <sys/wait.h>
 #include <sys/param.h>
 #include <sys/xattr.h>
+#include <sys/clonefile.h>
 #include <copyfile.h>
 #include <dirent.h>
 #include <zlib.h>
@@ -150,16 +151,76 @@ struct stage_ctx {
 	const char *root;
 	const char *stage;
 	struct svec *names;
+	struct svec nlinks;	/* octal link count per name, same order */
+	int *grp;		/* per name: 1 => member of a hardlink group */
+	unsigned long long *gkey;	/* per name: shared inode key */
+	int grp_n;
+	int grp_cap;
+	unsigned long long size_sum;
 	int failed;
 };
 
+/*
+ * Record the cpio inode-group membership of the next record.  pkgbuild keys
+ * odc ino by (dev,ino) for regular files with st_nlink > 1: every hardlink
+ * shares one ino, and an AppleDouble sidecar shadowing such a file inherits
+ * its group.  Directories, symlinks and nlink==1 files each get a fresh ino.
+ */
 static int
-stage_copy_file(const char *src, const char *dst)
+stage_push_ino(struct stage_ctx *ctx, int grouped, unsigned long long key)
 {
-	if (link(src, dst) == 0)
+	if (ctx->grp_n + 1 > ctx->grp_cap) {
+		int cap = ctx->grp_cap ? ctx->grp_cap : 32;
+		while (cap < ctx->grp_n + 1)
+			cap *= 2;
+		int *ng = realloc(ctx->grp, (size_t)cap * sizeof(*ng));
+		if (ng == NULL)
+			return -1;
+		ctx->grp = ng;
+		unsigned long long *nk = realloc(ctx->gkey,
+		    (size_t)cap * sizeof(*nk));
+		if (nk == NULL)
+			return -1;
+		ctx->gkey = nk;
+		ctx->grp_cap = cap;
+	}
+	ctx->grp[ctx->grp_n] = grouped;
+	ctx->gkey[ctx->grp_n] = key;
+	ctx->grp_n++;
+	return 0;
+}
+
+/* Record the source entry's link count for the next cpio record (both a
+ * node and any AppleDouble sidecar shadowing it carry the source nlink). */
+static int
+stage_push_nlink(struct stage_ctx *ctx, const struct stat *st)
+{
+	char nbuf[8];
+	snprintf(nbuf, sizeof nbuf, "%06o", (unsigned)(st->st_nlink & 0777777));
+	return svec_push(&ctx->nlinks, nbuf);
+}
+
+/* Copy the source timestamps onto a freshly created staged node so the
+ * archived mtimes match pkgbuild's (which preserves the source's). */
+static void
+stage_set_times(const char *dst, const struct stat *st, int nofollow)
+{
+	struct timespec ts[2];
+	ts[0] = st->st_atimespec;
+	ts[1] = st->st_mtimespec;
+	utimensat(AT_FDCWD, dst, ts, nofollow ? AT_SYMLINK_NOFOLLOW : 0);
+}
+
+/* Stage a regular file as an independent copy.  Hard-linking the source into
+ * the stage would bump the source's own st_nlink, corrupting the link counts
+ * pkgbuild records for every subsequent entry.  Returns 0 on success, -1 on
+ * error. */
+static int
+stage_copy_file(const char *src, const char *dst, const struct stat *st)
+{
+	if (clonefile(src, dst, 0) == 0)
 		return 0;
-	if (errno == EXDEV || errno == ENOTSUP) {
-		/* cross-device or unsupported: fall back to a plain copy */
+	{
 		int in = open(src, O_RDONLY);
 		if (in < 0)
 			return -1;
@@ -179,9 +240,10 @@ stage_copy_file(const char *src, const char *dst)
 		}
 		close(in);
 		close(outfd);
+		if (rc == 0)
+			stage_set_times(dst, st, 0);
 		return rc;
 	}
-	return -1;
 }
 
 static int
@@ -217,6 +279,8 @@ stage_entry(struct stage_ctx *ctx, const char *relpath)
 	if (S_ISDIR(st.st_mode)) {
 		if (mkdir(dst, st.st_mode & 0777) != 0 && errno != EEXIST)
 			goto fail;
+		if (chmod(dst, st.st_mode & 0777) != 0)
+			goto fail;
 	} else if (S_ISLNK(st.st_mode)) {
 		char target[PATH_MAX];
 		ssize_t t = readlink(src, target, sizeof target - 1);
@@ -225,8 +289,9 @@ stage_entry(struct stage_ctx *ctx, const char *relpath)
 		target[t] = '\0';
 		if (symlink(target, dst) != 0 && errno != EEXIST)
 			goto fail;
+		stage_set_times(dst, &st, 1);
 	} else if (S_ISREG(st.st_mode)) {
-		if (stage_copy_file(src, dst) != 0)
+		if (stage_copy_file(src, dst, &st) < 0)
 			goto fail;
 	}
 
@@ -236,12 +301,45 @@ stage_entry(struct stage_ctx *ctx, const char *relpath)
 	} else {
 		snprintf(name, sizeof name, ".");
 	}
+	ctx->size_sum += ((unsigned long long)st.st_size + 511) / 512 * 512;
 	if (svec_push(ctx->names, name) != 0)
 		goto fail;
+	if (stage_push_nlink(ctx, &st) != 0)
+		goto fail;
+	if (stage_push_ino(ctx, S_ISREG(st.st_mode) && st.st_nlink > 1,
+	    st.st_ino) != 0)
+		goto fail;
 
-	/* AppleDouble sidecar for xattr/resource-fork-bearing entries. */
-	if (relpath[0] && (S_ISDIR(st.st_mode) || S_ISREG(st.st_mode)) &&
-	    has_xattrs(src)) {
+	if (S_ISDIR(st.st_mode)) {
+		/* descend in readdir order, like a real copy */
+		DIR *d = opendir(src);
+		if (d != NULL) {
+			struct dirent *de;
+			while ((de = readdir(d)) != NULL) {
+				if (strcmp(de->d_name, ".") == 0 ||
+				    strcmp(de->d_name, "..") == 0)
+					continue;
+				char child[PATH_MAX];
+				int clen = relpath[0] ?
+				    snprintf(child, sizeof child, "%s/%s", relpath,
+				        de->d_name) :
+				    snprintf(child, sizeof child, "%s", de->d_name);
+				if (clen < 0 || (size_t)clen >= sizeof child)
+					continue;
+				stage_entry(ctx, child);
+				if (ctx->failed)
+					break;
+			}
+			closedir(d);
+		}
+		/* creating children bumped the mtime; restore the source's */
+		stage_set_times(dst, &st, 0);
+	}
+
+	/* AppleDouble sidecar, emitted post-order: pkgbuild archives a
+	 * directory's sidecar only after its entire subtree. */
+	if (relpath[0] && (S_ISDIR(st.st_mode) || S_ISREG(st.st_mode) ||
+	    S_ISLNK(st.st_mode)) && has_xattrs(src)) {
 		char parent[PATH_MAX];
 		const char *base = basename_of(relpath);
 		dirname_of(relpath, parent, sizeof parent);
@@ -260,34 +358,20 @@ stage_entry(struct stage_ctx *ctx, const char *relpath)
 			snprintf(sname, sizeof sname, "./%s", sid);
 		}
 
-		if (copyfile(src, sdst, NULL, COPYFILE_PACK) == 0) {
+		uint32_t cflags = COPYFILE_PACK | COPYFILE_XATTR;
+		if (S_ISLNK(st.st_mode))
+			cflags |= COPYFILE_NOFOLLOW;
+		if (copyfile(src, sdst, NULL, cflags) == 0) {
+			chmod(sdst, st.st_mode & 0666);
 			if (svec_push(ctx->names, sname) != 0)
 				goto fail;
+			if (stage_push_nlink(ctx, &st) != 0)
+				goto fail;
+			if (stage_push_ino(ctx,
+			    S_ISREG(st.st_mode) && st.st_nlink > 1,
+			    st.st_ino) != 0)
+				goto fail;
 		}
-	}
-
-	if (S_ISDIR(st.st_mode)) {
-		/* descend in sorted order, like a real copy */
-		DIR *d = opendir(src);
-		if (d == NULL)
-			return;
-		struct dirent *de;
-		while ((de = readdir(d)) != NULL) {
-			if (strcmp(de->d_name, ".") == 0 ||
-			    strcmp(de->d_name, "..") == 0)
-				continue;
-			char child[PATH_MAX];
-			int clen = relpath[0] ?
-			    snprintf(child, sizeof child, "%s/%s", relpath,
-			        de->d_name) :
-			    snprintf(child, sizeof child, "%s", de->d_name);
-			if (clen < 0 || (size_t)clen >= sizeof child)
-				continue;
-			stage_entry(ctx, child);
-			if (ctx->failed)
-				break;
-		}
-		closedir(d);
 	}
 	return;
 
@@ -366,6 +450,76 @@ run_cpio(const char *stage, struct svec *names, struct buf *out)
 	return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
 }
 
+/* pkgbuild's default ownership ("recommended") records uid/gid 0/0 and the
+ * source link counts, which cpio (staging into fresh nodes) cannot know.
+ * Rewrite those odc (070707) header fields from the recorded source values.
+ * The ino field is a fresh sequential id per record, except that entries in a
+ * hardlink group (regular files with st_nlink > 1, and their sidecars) share
+ * the id assigned to the group's first member. */
+static void
+odc_normalize(struct buf *b, const struct svec *nlinks, const int *grp,
+    const unsigned long long *gkey, int grp_n)
+{
+	struct { unsigned long long key; unsigned val; } *map = NULL;
+	int map_n = 0;
+	int map_cap = 0;
+
+	size_t i = 0;
+	int k = 0;
+	unsigned ctr = 0;
+	while (i + 76 <= b->n && memcmp(b->v + i, "070707", 6) == 0) {
+		char nbuf[12], fbuf[13];
+		memcpy(nbuf, b->v + i + 59, 6);
+		nbuf[6] = '\0';
+		memcpy(fbuf, b->v + i + 65, 11);
+		fbuf[11] = '\0';
+		long ns = strtol(nbuf, NULL, 8);
+		long fs = strtol(fbuf, NULL, 8);
+		unsigned val;
+		if (k < grp_n && grp[k]) {
+			int found = -1;
+			for (int j = 0; j < map_n; j++) {
+				if (map[j].key == gkey[k]) {
+					found = j;
+					break;
+				}
+			}
+			if (found >= 0) {
+				val = map[found].val;
+			} else {
+				val = ctr++;
+				if (map_n == map_cap) {
+					int cap = map_cap ? map_cap * 2 : 32;
+					void *nm = realloc(map,
+					    (size_t)cap * sizeof(*map));
+					if (nm != NULL) {
+						map = nm;
+						map_cap = cap;
+					}
+				}
+				if (map_n < map_cap) {
+					map[map_n].key = gkey[k];
+					map[map_n].val = val;
+					map_n++;
+				}
+			}
+		} else {
+			val = ctr++;
+		}
+		char ibuf[8];
+		snprintf(ibuf, sizeof ibuf, "%06o", val & 0777777);
+		memset(b->v + i + 6, '0', 6);	/* dev */
+		memcpy(b->v + i + 12, ibuf, 6);	/* ino */
+		memset(b->v + i + 24, '0', 6);	/* uid */
+		memset(b->v + i + 30, '0', 6);	/* gid */
+		if (k < nlinks->n)
+			memcpy(b->v + i + 36, nlinks->v[k], 6);	/* nlink */
+		k++;
+		i += 76 + (size_t)ns + (size_t)fs;
+	}
+	free(map);
+}
+
 /* --- gzip (RFC 1952) via raw deflate (windowBits = 15 + 16) --- */
 
 static int
@@ -406,6 +560,11 @@ gzip_bytes(const void *in, size_t n, unsigned char **out, size_t *out_len)
 		}
 	}
 	deflateEnd(&s);
+
+	/* Match pkgbuild's gzip header: OS byte is Unix (0x03), not zlib's
+	 * platform default on macOS. */
+	if (b.n >= 10 && b.v[0] == 0x1f && b.v[1] == 0x8b)
+		b.v[9] = 0x03;
 
 	*out = b.v;
 	*out_len = b.n;
@@ -453,10 +612,21 @@ payload_build(const char *root, struct payload *out)
 	names.n = 0;
 	names.cap = 0;
 
+	struct buf odc;
+	buf_init(&odc);
+
 	struct stage_ctx ctx;
 	ctx.root = root;
 	ctx.stage = stage;
 	ctx.names = &names;
+	ctx.nlinks.v = NULL;
+	ctx.nlinks.n = 0;
+	ctx.nlinks.cap = 0;
+	ctx.grp = NULL;
+	ctx.gkey = NULL;
+	ctx.grp_n = 0;
+	ctx.grp_cap = 0;
+	ctx.size_sum = 0;
 	ctx.failed = 0;
 	stage_entry(&ctx, "");
 
@@ -466,10 +636,9 @@ payload_build(const char *root, struct payload *out)
 	if (names.n == 0)
 		goto done;
 
-	struct buf odc;
-	buf_init(&odc);
 	if (run_cpio(stage, &names, &odc) != 0)
 		goto done;
+	odc_normalize(&odc, &ctx.nlinks, ctx.grp, ctx.gkey, ctx.grp_n);
 
 	unsigned char *gz = NULL;
 	size_t gzlen = 0;
@@ -480,11 +649,87 @@ payload_build(const char *root, struct payload *out)
 	out->size = gzlen;
 	out->uncompressed = odc.n;
 	out->file_count = names.n;
+	out->install_kbytes = (size_t)(ctx.size_sum / 1024);
 	rc = 0;
 
 done:
 	buf_free(&odc);
 	svec_free(&names);
+	svec_free(&ctx.nlinks);
+	free(ctx.grp);
+	free(ctx.gkey);
 	remove_tree(stage);
 	return rc;
+}
+
+int
+payload_stage(const char *root, char **stage_out, struct payload *out)
+{
+	char tmpl[] = "/tmp/pkgbuild-stage.XXXXXX";
+	char *stage = mkdtemp(tmpl);
+	if (stage == NULL)
+		return -1;
+
+	struct svec names;
+	names.v = NULL;
+	names.n = 0;
+	names.cap = 0;
+
+	struct buf odc;
+	buf_init(&odc);
+
+	struct stage_ctx ctx;
+	ctx.root = root;
+	ctx.stage = stage;
+	ctx.names = &names;
+	ctx.nlinks.v = NULL;
+	ctx.nlinks.n = 0;
+	ctx.nlinks.cap = 0;
+	ctx.grp = NULL;
+	ctx.gkey = NULL;
+	ctx.grp_n = 0;
+	ctx.grp_cap = 0;
+	ctx.size_sum = 0;
+	ctx.failed = 0;
+	stage_entry(&ctx, "");
+
+	int rc = -1;
+	if (ctx.failed)
+		goto done;
+	if (names.n == 0)
+		goto done;
+
+	if (run_cpio(stage, &names, &odc) != 0)
+		goto done;
+	odc_normalize(&odc, &ctx.nlinks, ctx.grp, ctx.gkey, ctx.grp_n);
+
+	unsigned char *gz = NULL;
+	size_t gzlen = 0;
+	if (gzip_bytes(odc.v, odc.n, &gz, &gzlen) != 0)
+		goto done;
+
+	out->data = gz;
+	out->size = gzlen;
+	out->uncompressed = odc.n;
+	out->file_count = names.n;
+	out->install_kbytes = (size_t)(ctx.size_sum / 1024);
+
+	rc = 0;
+
+done:
+	buf_free(&odc);
+	svec_free(&names);
+	svec_free(&ctx.nlinks);
+	free(ctx.grp);
+	free(ctx.gkey);
+	if (rc != 0) {
+		remove_tree(stage);
+		return rc;
+	}
+	*stage_out = strdup(stage);
+	if (*stage_out == NULL) {
+		remove_tree(stage);
+		return -1;
+	}
+	return 0;
 }

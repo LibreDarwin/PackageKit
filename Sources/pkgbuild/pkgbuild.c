@@ -22,6 +22,7 @@
 
 #include "xar.h"
 #include "analyze.h"
+#include "bundles.h"
 #include "payload.h"
 #include "bom.h"
 
@@ -34,15 +35,15 @@ usage(int status)
 {
 	FILE *out = status == 0 ? stdout : stderr;
 	fprintf(out,
-"usage: %s --root <dir> [options] -o <pkg>\n"
-"       %s --analyze --root <dir> [options]\n"
+"usage: %s --root <dir> [options] <pkg>\n"
+"       %s --analyze --root <dir> [options] <plist>\n"
 "       %s --inspect <pkg>\n"
 "\n"
 "options:\n"
 "  --root <dir>            source root to package\n"
 "  --component <dir>       alias of --root\n"
 "  --identifier <id>       bundle identifier (default com.apple.unknown)\n"
-"  --version <v>           package version (default 1.0)\n"
+"  --version <v>           package version (default 0)\n"
 "  --install-location <dir> install path; omits it => relocatable\n"
 "  --scripts <dir>         pre/post-install scripts (v1: accepted, not run)\n"
 "  --sign <identity>       codesign the resulting archive\n"
@@ -159,6 +160,9 @@ main(int argc, char **argv)
 	(void)scripts_dir;
 	(void)dev_dir;
 
+	if (out_path == NULL && optind < argc)
+		out_path = argv[optind];
+
 	/* Mode: inspect an existing archive. */
 	if (inspect_pkg != NULL) {
 		size_t plen = 0;
@@ -179,10 +183,48 @@ main(int argc, char **argv)
 		usage(1);
 	}
 
-	/* Build the payload (cpio/odc + gzip) and BOM. */
+	/* Mode: infer bundle components and write a component property list. */
+	if (analyze) {
+		if (out_path == NULL) {
+			fprintf(stderr,
+			    "%s: must specify an output path for --analyze\n",
+			    program_name);
+			usage(1);
+		}
+		printf("pkgbuild: Inferring bundle components from contents of %s\n",
+		    src);
+		size_t plen = 0;
+		char *plist = component_plist_for_root(src, &plen);
+		if (plist == NULL) {
+			fprintf(stderr, "%s: failed to analyze %s\n",
+			    program_name, src);
+			return 1;
+		}
+		printf("pkgbuild: Writing new component property list to %s\n",
+		    out_path);
+		if (write_file(out_path, plist, plen) != 0) {
+			fprintf(stderr, "%s: cannot write %s\n", program_name,
+			    out_path);
+			free(plist);
+			return 1;
+		}
+		free(plist);
+		return 0;
+	}
+
+	printf("pkgbuild: Inferring bundle components from contents of %s\n", src);
+	struct bundle_components *bundles = bundles_for_root(src);
+	if (bundles != NULL)
+		for (size_t i = 0; i < bundles->n; i++)
+			printf("pkgbuild: Adding component at %s\n",
+			    bundles->v[i].path);
+
+	/* Build the payload (cpio/odc + gzip) and BOM from staged tree. */
 	struct payload pl;
-	if (payload_build(src, &pl) != 0) {
+	char *stage_dir = NULL;
+	if (payload_stage(src, &stage_dir, &pl) != 0) {
 		fprintf(stderr, "%s: failed to build Payload\n", program_name);
+		bundles_free(bundles);
 		return 1;
 	}
 	size_t bom_len = 0;
@@ -190,30 +232,35 @@ main(int argc, char **argv)
 	if (bom == NULL) {
 		fprintf(stderr, "%s: failed to build BOM\n", program_name);
 		free(pl.data);
+		bundles_free(bundles);
+		/* cleanup stage */
+		{
+			char cmd[8192];
+			snprintf(cmd, sizeof cmd, "rm -rf \"%s\"", stage_dir);
+			system(cmd);
+		}
+		free(stage_dir);
 		return 1;
 	}
+	{
+		char cmd[8192];
+		snprintf(cmd, sizeof cmd, "rm -rf \"%s\"", stage_dir);
+		system(cmd);
+	}
+	free(stage_dir);
 
-	size_t install_kbytes = (pl.uncompressed + 1023) / 1024;
-	if (install_kbytes == 0)
-		install_kbytes = 1;
+	size_t install_kbytes = pl.install_kbytes;
 
 	size_t pkginfo_len = 0;
-	char *pkginfo = pkginfo_build(identifier, version ? version : "1.0",
+	char *pkginfo = pkginfo_build(identifier, version ? version : "0",
 	    install_location, scripts_dir, pl.file_count, install_kbytes,
-	    &pkginfo_len);
+	    bundles, &pkginfo_len);
+	bundles_free(bundles);
 	if (pkginfo == NULL) {
 		fprintf(stderr, "%s: failed to build PackageInfo\n", program_name);
 		free(pl.data);
 		free(bom);
 		return 1;
-	}
-
-	if (analyze) {
-		fwrite(pkginfo, 1, pkginfo_len, stdout);
-		free(pkginfo);
-		free(bom);
-		free(pl.data);
-		return 0;
 	}
 
 	/* Assemble the xar archive. */
@@ -303,6 +350,6 @@ main(int argc, char **argv)
 			fprintf(stderr, "%s: codesign failed\n", program_name);
 	}
 
-	fprintf(stderr, "pkgbuild: %s\n", out);
+	printf("pkgbuild: Wrote package to %s\n", out);
 	return 0;
 }

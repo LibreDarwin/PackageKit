@@ -20,12 +20,15 @@ BUILD_DIR := build/$(CONFIG)
 OBJDIR    := $(BUILD_DIR)/obj
 
 CFLAGS := $(OPT) -std=c11 -D_DARWIN_C_SOURCE -isysroot "$(SDK)" -Wall -Wextra
-LDLIBS := -lz
+LDLIBS := -lz -framework CoreFoundation
 
 PKG  := $(BUILD_DIR)/pkgbuild
 PKG_OBJS := $(OBJDIR)/pkgbuild/pkgbuild.o $(OBJDIR)/pkgbuild/analyze.o \
-	$(OBJDIR)/pkgbuild/bom.o $(OBJDIR)/pkgbuild/payload.o \
-	$(OBJDIR)/pkgbuild/xar.o
+	$(OBJDIR)/pkgbuild/bundles.o $(OBJDIR)/pkgbuild/bom.o \
+	$(OBJDIR)/pkgbuild/payload.o $(OBJDIR)/pkgbuild/xar.o \
+	$(OBJDIR)/pkgbuild/bomlib/bom_btree.o $(OBJDIR)/pkgbuild/bomlib/bom_cksum.o \
+	$(OBJDIR)/pkgbuild/bomlib/bom_writer.o $(OBJDIR)/pkgbuild/bomlib/fs_walk.o \
+	$(OBJDIR)/pkgbuild/bomlib/bomstor.o $(OBJDIR)/pkgbuild/bomlib/bom_pkg.o
 
 PROD := $(BUILD_DIR)/productbuild
 PROD_OBJS := $(OBJDIR)/productbuild/productbuild.o \
@@ -48,15 +51,19 @@ $(PROD): $(PROD_OBJS)
 
 # pkgbuild
 
-$(OBJDIR)/pkgbuild/pkgbuild.o: Sources/pkgbuild/pkgbuild.c Sources/pkgbuild/xar.h Sources/pkgbuild/analyze.h Sources/pkgbuild/payload.h Sources/pkgbuild/bom.h
+$(OBJDIR)/pkgbuild/pkgbuild.o: Sources/pkgbuild/pkgbuild.c Sources/pkgbuild/xar.h Sources/pkgbuild/analyze.h Sources/pkgbuild/bundles.h Sources/pkgbuild/payload.h Sources/pkgbuild/bom.h
 	@mkdir -p $(OBJDIR)/pkgbuild
 	$(CC) $(CFLAGS) -c -o $@ Sources/pkgbuild/pkgbuild.c
 
-$(OBJDIR)/pkgbuild/analyze.o: Sources/pkgbuild/analyze.c Sources/pkgbuild/analyze.h
+$(OBJDIR)/pkgbuild/analyze.o: Sources/pkgbuild/analyze.c Sources/pkgbuild/analyze.h Sources/pkgbuild/bundles.h
 	@mkdir -p $(OBJDIR)/pkgbuild
 	$(CC) $(CFLAGS) -c -o $@ Sources/pkgbuild/analyze.c
 
-$(OBJDIR)/pkgbuild/bom.o: Sources/pkgbuild/bom.c Sources/pkgbuild/bom.h
+$(OBJDIR)/pkgbuild/bundles.o: Sources/pkgbuild/bundles.c Sources/pkgbuild/bundles.h
+	@mkdir -p $(OBJDIR)/pkgbuild
+	$(CC) $(CFLAGS) -c -o $@ Sources/pkgbuild/bundles.c
+
+$(OBJDIR)/pkgbuild/bom.o: Sources/pkgbuild/bom.c Sources/pkgbuild/bom.h Sources/pkgbuild/bomlib/bom_pkg.h
 	@mkdir -p $(OBJDIR)/pkgbuild
 	$(CC) $(CFLAGS) -c -o $@ Sources/pkgbuild/bom.c
 
@@ -67,6 +74,30 @@ $(OBJDIR)/pkgbuild/payload.o: Sources/pkgbuild/payload.c Sources/pkgbuild/payloa
 $(OBJDIR)/pkgbuild/xar.o: Sources/pkgbuild/xar.c Sources/pkgbuild/xar.h
 	@mkdir -p $(OBJDIR)/pkgbuild
 	$(CC) $(CFLAGS) -c -o $@ Sources/pkgbuild/xar.c
+$(OBJDIR)/pkgbuild/bomlib/bom_btree.o: Sources/pkgbuild/bomlib/bom_btree.c Sources/pkgbuild/bomlib/bom_btree.h
+	@mkdir -p $(OBJDIR)/pkgbuild/bomlib
+	$(CC) $(CFLAGS) -c -o $@ Sources/pkgbuild/bomlib/bom_btree.c
+
+$(OBJDIR)/pkgbuild/bomlib/bom_cksum.o: Sources/pkgbuild/bomlib/bom_cksum.c Sources/pkgbuild/bomlib/bom_cksum.h
+	@mkdir -p $(OBJDIR)/pkgbuild/bomlib
+	$(CC) $(CFLAGS) -c -o $@ Sources/pkgbuild/bomlib/bom_cksum.c
+
+$(OBJDIR)/pkgbuild/bomlib/bom_writer.o: Sources/pkgbuild/bomlib/bom_writer.c Sources/pkgbuild/bomlib/bom_writer.h
+	@mkdir -p $(OBJDIR)/pkgbuild/bomlib
+	$(CC) $(CFLAGS) -c -o $@ Sources/pkgbuild/bomlib/bom_writer.c
+
+$(OBJDIR)/pkgbuild/bomlib/fs_walk.o: Sources/pkgbuild/bomlib/fs_walk.c Sources/pkgbuild/bomlib/fs_walk.h
+	@mkdir -p $(OBJDIR)/pkgbuild/bomlib
+	$(CC) $(CFLAGS) -c -o $@ Sources/pkgbuild/bomlib/fs_walk.c
+
+$(OBJDIR)/pkgbuild/bomlib/bomstor.o: Sources/pkgbuild/bomlib/bomstor.c Sources/pkgbuild/bomlib/bomstor.h
+	@mkdir -p $(OBJDIR)/pkgbuild/bomlib
+	$(CC) $(CFLAGS) -c -o $@ Sources/pkgbuild/bomlib/bomstor.c
+
+$(OBJDIR)/pkgbuild/bomlib/bom_pkg.o: Sources/pkgbuild/bomlib/bom_pkg.c Sources/pkgbuild/bomlib/bom_pkg.h Sources/pkgbuild/bomlib/bom_cksum.h
+	@mkdir -p $(OBJDIR)/pkgbuild/bomlib
+	$(CC) $(CFLAGS) -c -o $@ Sources/pkgbuild/bomlib/bom_pkg.c
+
 
 # productbuild
 
