@@ -61,6 +61,14 @@ typedef struct btree_plan {
 int bom_btree_plan(const btree_key *keys, size_t nrows,
                    const uint32_t *insertion_order, btree_plan *out);
 
+/* Like bom_btree_plan, but the sort order is supplied directly as
+ * sort_rank[idx] = the 0-based rank of key idx in the sorted order (a
+ * permutation of 0..nrows-1).  Used for the HLIndex tree, whose sort key is
+ * the breadth-first (discovery) rank of each entry rather than the
+ * (parent,name) path key. */
+int bom_btree_plan_ranks(const uint32_t *sort_rank, size_t nrows,
+                         const uint32_t *insertion_order, btree_plan *out);
+
 void bom_btree_plan_free(btree_plan *p);
 
 #endif /* BOM_BTREE_H */

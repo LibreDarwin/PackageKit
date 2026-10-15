@@ -30,6 +30,10 @@
 
 #include "bom_cksum.h"
 #include "bom_pkg.h"
+#include "bom_btree.h"
+
+static uint32_t g_paths_leaf[4096], g_paths_nl, g_paths_int;
+static uint32_t g_hl_leaf[4096], g_hl_nl, g_hl_int;
 
 #define IDX_POOL   2730u
 #define IDX_SIZE   (4u + 8u * IDX_POOL + 60u)	/* 0x5590 */
@@ -87,6 +91,7 @@ typedef struct {
 	bm_mslice sl[BM_MAXSLICE];
 	uint32_t recsize;
 	uint32_t prblk, fileblk, piiblk, qbase;
+	uint32_t br;		/* breadth-first (discovery) rank */
 } ent;
 
 static int g_fail;
@@ -412,6 +417,7 @@ scan(const char *abs, const char *rel, const char *leaf, uint32_t parent,
 	}
 	pid = *n + 1;
 	e = &ents[(*n)++];
+	memset(e, 0, sizeof(*e));
 	if (lstat(abs, &st) != 0) {
 		g_fail = 1;
 		return;
@@ -545,12 +551,15 @@ bm_pkg_build(const char *root, size_t *out_len)
 	uint32_t var_addr[5], info12 = 0, commits[2], idx_size = IDX_SIZE;
 	uint32_t pool = IDX_POOL;
 	ent **dorder = NULL, **porder = NULL;
+	btree_plan pplan, hplan;
 	uint32_t ninfo, narch = 0;
 	uint32_t arcp[BM_MAXSLICE];
 	uint64_t arsz[BM_MAXSLICE];
 
 	memset(&bt, 0, sizeof(bt));
 	memset(&A, 0, sizeof(A));
+	memset(&pplan, 0, sizeof(pplan));
+	memset(&hplan, 0, sizeof(hplan));
 
 	ents = calloc(cap, sizeof(*ents));
 	if (ents == NULL)
@@ -631,28 +640,63 @@ bm_pkg_build(const char *root, size_t *out_len)
 
 	for (i = 0; i < n; i++) {
 		ent *e = &ents[i];
-		e->prblk = 11 + 3 * i;
-		e->fileblk = e->prblk + 1;
-		e->piiblk = e->prblk + 2;
 		e->recsize = (e->type == 1 && !e->sidecar) ? 35 : 31;
 		if (e->type == 1 && e->macho)
 			e->recsize = 40 + 16 * (uint32_t)e->nsl;
 		if (e->type == 3)
 			e->recsize = 31 + e->lnklen + 8;
-		bt.size[e->prblk] = e->recsize;
-		bt.size[e->fileblk] = 4 + (uint32_t)strlen(e->name) + 1;
-		bt.size[e->piiblk] = 8;
 		dorder[i] = porder[i] = e;
 	}
 	qsort(dorder, n, sizeof(*dorder), cmp_dfs);
 	qsort(porder, n, sizeof(*porder), cmp_paths);
-	for (i = 0; i < n; i++) {
-		ent *e = dorder[i];
-		e->qbase = 11 + 3 * n + 4 * i;
-		bt.size[e->qbase + 0] = 21;
-		bt.size[e->qbase + 1] = 64;
-		bt.size[e->qbase + 2] = 4;
-		bt.size[e->qbase + 3] = 4;
+
+	/* Breadth-first (discovery) rank of every entry: root first, then each
+	 * node's children in ascending pid order.  This is the HLIndex sort key. */
+	{
+		uint32_t *q = malloc(n ? n * sizeof(uint32_t) : 1);
+		uint32_t qh = 0, qt = 0, z, rank = 0;
+		if (q == NULL)
+			goto done;
+		q[qt++] = 0;	/* root entry */
+		for (i = 0; i < n; i++)
+			ents[i].br = 0;
+		while (qh < qt) {
+			uint32_t cur = q[qh++];
+			uint32_t pid = ents[cur].pid;
+			ents[cur].br = rank++;
+			for (z = 1; z < n; z++)
+				if (ents[z].parent == pid && z != cur)
+					q[qt++] = z;
+		}
+		free(q);
+	}
+
+	/* Build both tree layout plans up front.  The Paths tree is keyed by
+	 * (parent,name) and inserted in path (pid) order; the HLIndex tree is
+	 * keyed by breadth-first rank and inserted in dfs (sorted-path) order. */
+	{
+		btree_key *keys = calloc(n ? n : 1, sizeof(btree_key));
+		uint32_t *insord = calloc(n ? n : 1, sizeof(uint32_t));
+		uint32_t *hlrank = calloc(n ? n : 1, sizeof(uint32_t));
+		memset(&pplan, 0, sizeof(pplan));
+		memset(&hplan, 0, sizeof(hplan));
+		if (keys == NULL || insord == NULL || hlrank == NULL) {
+			free(keys); free(insord); free(hlrank);
+			goto done;
+		}
+		for (i = 0; i < n; i++) {
+			keys[i].parent = ents[i].parent;
+			keys[i].name = ents[i].name;
+			insord[i] = (uint32_t)i;
+			hlrank[i] = ents[i].br;
+		}
+		bom_btree_plan(keys, (size_t)n, insord, &pplan);
+		for (i = 0; i < n; i++)
+			insord[i] = (uint32_t)(dorder[i] - ents);
+		bom_btree_plan_ranks(hlrank, (size_t)n, insord, &hplan);
+		free(keys);
+		free(insord);
+		free(hlrank);
 	}
 	narch = 0;
 	for (i = 0; i < n; i++) {
@@ -717,20 +761,105 @@ bm_pkg_build(const char *root, size_t *out_len)
 		bt.addr[ID_MT_L] = fl_take(&A, 4096);
 		bt.addr[ID_MT_H] = fl_take(&A, 21);
 #undef NAMED
-		for (i = 0; i < n; i++) {
-			bt.addr[ents[i].prblk] = fl_take(&A, bt.size[ents[i].prblk]);
-			bt.addr[ents[i].fileblk] = fl_take(&A, bt.size[ents[i].fileblk]);
-			bt.addr[ents[i].piiblk] = fl_take(&A, 8);
+
+		/* Grow the block table to its final size: fixed ids 1..10, three
+		 * record blocks per entry (ent order), the Paths tree pages, four
+		 * quad blocks per entry (dfs order) and the HLIndex tree pages. */
+		{
+			uint32_t Pp = (pplan.nleaf ? (uint32_t)pplan.nleaf - 1 : 0)
+			    + (pplan.nleaf > 1 ? 1 : 0);
+			uint32_t Hp = (hplan.nleaf ? (uint32_t)hplan.nleaf - 1 : 0)
+			    + (hplan.nleaf > 1 ? 1 : 0);
+			uint32_t NB = 10u + 7u * n + Pp + Hp;
+			uint32_t oldn = bt.nblocks;
+			if (NB > bt.nblocks) {
+				bt.nblocks = NB;
+				bt.addr = realloc(bt.addr,
+				    (bt.nblocks + 1) * sizeof(uint32_t));
+				bt.size = realloc(bt.size,
+				    (bt.nblocks + 1) * sizeof(uint32_t));
+				bt.data = realloc(bt.data,
+				    (bt.nblocks + 1) * sizeof(unsigned char *));
+				memset(bt.addr + oldn + 1, 0,
+				    (bt.nblocks - oldn) * sizeof(uint32_t));
+				memset(bt.size + oldn + 1, 0,
+				    (bt.nblocks - oldn) * sizeof(uint32_t));
+				memset(bt.data + oldn + 1, 0,
+				    (bt.nblocks - oldn) * sizeof(unsigned char *));
+			}
 		}
-		for (i = 0; i < n; i++) {
-			ent *e = dorder[i];
-			bt.addr[e->qbase + 1] = fl_take(&A, 64);
-			bt.addr[e->qbase + 0] = fl_take(&A, 21);
-			bt.addr[e->qbase + 2] = fl_take(&A, 4);
-			bt.addr[e->qbase + 3] = fl_take(&A, 4);
+
+		g_paths_nl = (uint32_t)pplan.nleaf;
+		g_hl_nl = (uint32_t)hplan.nleaf;
+		g_paths_leaf[0] = ID_PATHS_L;
+		g_hl_leaf[0] = ID_HL_L;
+		{
+			uint32_t bump = 11, sp = 0, sh = 0;
+			for (i = 0; i < n; i++) {
+				ent *e = &ents[i];
+				e->prblk = bump++;
+				e->fileblk = bump++;
+				e->piiblk = bump++;
+				bt.size[e->prblk] = e->recsize;
+				bt.size[e->fileblk] =
+				    4 + (uint32_t)strlen(e->name) + 1;
+				bt.size[e->piiblk] = 8;
+				bt.addr[e->prblk] = fl_take(&A, bt.size[e->prblk]);
+				bt.addr[e->fileblk] =
+				    fl_take(&A, bt.size[e->fileblk]);
+				bt.addr[e->piiblk] = fl_take(&A, 8);
+				/* Tree pages get their ids here (interleaved
+				 * with the records) but are not physically
+				 * allocated until after BomInfo. */
+				while (sp < pplan.nsplits &&
+				    pplan.splits[sp].insert == i) {
+					uint32_t cid = pplan.splits[sp].newleaf;
+					g_paths_leaf[cid] = bump++;
+					bt.size[g_paths_leaf[cid]] = 4096;
+					if (sp == 0) {
+						g_paths_int = bump++;
+						bt.size[g_paths_int] = 4096;
+					}
+					sp++;
+				}
+			}
+			for (i = 0; i < n; i++) {
+				ent *e = dorder[i];
+				e->qbase = bump;
+				bump += 4;
+				bt.size[e->qbase + 0] = 21;
+				bt.size[e->qbase + 1] = 64;
+				bt.size[e->qbase + 2] = 4;
+				bt.size[e->qbase + 3] = 4;
+				bt.addr[e->qbase + 1] = fl_take(&A, 64);
+				bt.addr[e->qbase + 0] = fl_take(&A, 21);
+				bt.addr[e->qbase + 2] = fl_take(&A, 4);
+				bt.addr[e->qbase + 3] = fl_take(&A, 4);
+				while (sh < hplan.nsplits &&
+				    hplan.splits[sh].insert == i) {
+					uint32_t cid = hplan.splits[sh].newleaf;
+					g_hl_leaf[cid] = bump++;
+					bt.size[g_hl_leaf[cid]] = 4096;
+					if (sh == 0) {
+						g_hl_int = bump++;
+						bt.size[g_hl_int] = 4096;
+					}
+					sh++;
+				}
+			}
 		}
 		fl_push(&A, info12, 12);
 		bt.addr[ID_INFO] = fl_take(&A, bt.size[ID_INFO]);
+
+		/* Tree pages are physically allocated last.  The Paths pages come
+		 * first (leaves in creation order, then the interior), then space
+		 * is reserved for the first index copy, then the HLIndex pages
+		 * (leaves in creation order, then the interior), then space for
+		 * the final index copy which the header points at. */
+		for (i = 1; i < pplan.nleaf; i++)
+			bt.addr[g_paths_leaf[i]] = fl_take(&A, 4096);
+		if (pplan.nleaf > 1)
+			bt.addr[g_paths_int] = fl_take(&A, 4096);
 		{
 			uint32_t *ta = malloc(sizeof(uint32_t) * (OVFL + 64));
 			uint32_t *ts = malloc(sizeof(uint32_t) * (OVFL + 64));
@@ -747,6 +876,10 @@ bm_pkg_build(const char *root, size_t *out_len)
 		}
 		commits[0] = A.hi;
 		A.hi += idx_size;
+		for (i = 1; i < hplan.nleaf; i++)
+			bt.addr[g_hl_leaf[i]] = fl_take(&A, 4096);
+		if (hplan.nleaf > 1)
+			bt.addr[g_hl_int] = fl_take(&A, 4096);
 		commits[1] = A.hi;
 		A.hi += idx_size;
 	}
@@ -766,68 +899,161 @@ bm_pkg_build(const char *root, size_t *out_len)
 	put32(out + info12 + 4, 1);
 	put32(out + info12 + 8, 0);
 
-	/* fixed tree blocks */
+	/* fixed tree blocks.  Paths is keyed by (parent,name) and inserted in
+	 * ent order; HLIndex is keyed by breadth-first rank and inserted in dfs
+	 * order.  Layout plans were built up front in pass 1. */
 	{
 		unsigned char h[21];
-		unsigned char *l;
+		uint32_t *leafblk = NULL;
+		size_t j;
+
+		/* ---- Paths ---- */
+		leafblk = calloc(pplan.nleaf ? pplan.nleaf : 1, sizeof(uint32_t));
+		if (leafblk == NULL)
+			goto done;
+		for (j = 0; j < pplan.nleaf; j++)
+			leafblk[pplan.chain[j]] = g_paths_leaf[pplan.chain[j]];
 		memcpy(h, "tree", 4);
 		put32(h + 4, 1);
-		put32(h + 8, ID_PATHS_L);
+		put32(h + 8, g_paths_int ? g_paths_int
+		    : (pplan.nleaf ? leafblk[pplan.chain[0]] : ID_PATHS_L));
 		put32(h + 12, 0x1000);
-		put32(h + 16, n);
+		put32(h + 16, (uint32_t)n);
 		h[20] = 0;
 		memcpy(out + bt.addr[ID_PATHS_H], h, 21);
-		l = calloc(1, 4096);
-		put16(l, 1);
-		put16(l + 2, (uint16_t)n);
-		for (i = 0; i < n; i++) {
-			put32(l + 12 + 8 * i, porder[i]->piiblk);
-			put32(l + 16 + 8 * i, porder[i]->fileblk);
+		for (j = 0; j < pplan.nleaf; j++) {
+			uint32_t cid = pplan.chain[j];
+			unsigned char *lbuf = calloc(1, 4096);
+			uint32_t nxt = (j + 1 < pplan.nleaf)
+			    ? leafblk[pplan.chain[j + 1]] : 0;
+			uint32_t prv = (j > 0)
+			    ? leafblk[pplan.chain[j - 1]] : 0;
+			size_t sst = pplan.leaf[cid].start;
+			size_t cst = pplan.leaf[cid].count;
+			put16(lbuf, 1);
+			put16(lbuf + 2, (uint16_t)cst);
+			put32(lbuf + 4, nxt);
+			put32(lbuf + 8, prv);
+			for (i = 0; (size_t)i < cst; i++) {
+				size_t rnk = (size_t)pplan.sorted[sst + i];
+				put32(lbuf + 12 + 8 * i, ents[rnk].piiblk);
+				put32(lbuf + 16 + 8 * i, ents[rnk].fileblk);
+			}
+			memcpy(out + bt.addr[leafblk[cid]], lbuf, 4096);
+			free(lbuf);
 		}
-		memcpy(out + bt.addr[ID_PATHS_L], l, 4096);
-		free(l);
+		if (pplan.nleaf > 1 && g_paths_int) {
+			unsigned char *nbuf = calloc(1, 4096);
+			put16(nbuf, 0);
+			put16(nbuf + 2, (uint16_t)(pplan.nleaf - 1));
+			put32(nbuf + 4, 0);
+			put32(nbuf + 8, 0);
+			for (j = 0; j + 1 < pplan.nleaf; j++) {
+				uint32_t cid = pplan.chain[j];
+				size_t lastr = pplan.leaf[cid].start +
+				    pplan.leaf[cid].count - 1;
+				uint32_t el = (uint32_t)pplan.sorted[lastr];
+				put32(nbuf + 12 + 8 * j, leafblk[cid]);
+				put32(nbuf + 16 + 8 * j, ents[el].fileblk);
+			}
+			{
+				uint32_t cl = pplan.chain[pplan.nleaf - 1];
+				put32(nbuf + 12 + 8 * (pplan.nleaf - 1),
+				    leafblk[cl]);
+				put32(nbuf + 16 + 8 * (pplan.nleaf - 1), 0);
+			}
+			memcpy(out + bt.addr[g_paths_int], nbuf, 4096);
+			free(nbuf);
+		}
+		free(leafblk);
 
-		put32(h + 8, ID_HL_L);
+		/* ---- HLIndex ---- */
+		leafblk = calloc(hplan.nleaf ? hplan.nleaf : 1, sizeof(uint32_t));
+		if (leafblk == NULL)
+			goto done;
+		for (j = 0; j < hplan.nleaf; j++)
+			leafblk[hplan.chain[j]] = g_hl_leaf[hplan.chain[j]];
+		memcpy(h, "tree", 4);
+		put32(h + 4, 1);
+		put32(h + 8, g_hl_int ? g_hl_int
+		    : (hplan.nleaf ? leafblk[hplan.chain[0]] : ID_HL_L));
 		put32(h + 12, 0x1000);
-		put32(h + 16, n);
+		put32(h + 16, (uint32_t)n);
+		h[20] = 0;
 		memcpy(out + bt.addr[ID_HL_H], h, 21);
-		l = calloc(1, 4096);
-		put16(l, 1);
-		put16(l + 2, (uint16_t)n);
-		for (i = 0; i < n; i++) {
-			put32(l + 12 + 8 * i, ents[i].qbase + 3);
-			put32(l + 16 + 8 * i, ents[i].qbase + 2);
+		for (j = 0; j < hplan.nleaf; j++) {
+			uint32_t cid = hplan.chain[j];
+			unsigned char *lbuf = calloc(1, 4096);
+			uint32_t nxt = (j + 1 < hplan.nleaf)
+			    ? leafblk[hplan.chain[j + 1]] : 0;
+			uint32_t prv = (j > 0)
+			    ? leafblk[hplan.chain[j - 1]] : 0;
+			size_t sst = hplan.leaf[cid].start;
+			size_t cst = hplan.leaf[cid].count;
+			put16(lbuf, 1);
+			put16(lbuf + 2, (uint16_t)cst);
+			put32(lbuf + 4, nxt);
+			put32(lbuf + 8, prv);
+			for (i = 0; (size_t)i < cst; i++) {
+				size_t rnk = (size_t)hplan.sorted[sst + i];
+				put32(lbuf + 12 + 8 * i, ents[rnk].qbase + 3);
+				put32(lbuf + 16 + 8 * i, ents[rnk].qbase + 2);
+			}
+			memcpy(out + bt.addr[leafblk[cid]], lbuf, 4096);
+			free(lbuf);
 		}
-		memcpy(out + bt.addr[ID_HL_L], l, 4096);
-		free(l);
+		if (hplan.nleaf > 1 && g_hl_int) {
+			unsigned char *nbuf = calloc(1, 4096);
+			put16(nbuf, 0);
+			put16(nbuf + 2, (uint16_t)(hplan.nleaf - 1));
+			put32(nbuf + 4, 0);
+			put32(nbuf + 8, 0);
+			for (j = 0; j + 1 < hplan.nleaf; j++) {
+				uint32_t cid = hplan.chain[j];
+				size_t lastr = hplan.leaf[cid].start +
+				    hplan.leaf[cid].count - 1;
+				uint32_t el = (uint32_t)hplan.sorted[lastr];
+				put32(nbuf + 12 + 8 * j, leafblk[cid]);
+				put32(nbuf + 16 + 8 * j, ents[el].qbase + 2);
+			}
+			{
+				uint32_t cl = hplan.chain[hplan.nleaf - 1];
+				put32(nbuf + 12 + 8 * (hplan.nleaf - 1),
+				    leafblk[cl]);
+				put32(nbuf + 16 + 8 * (hplan.nleaf - 1), 0);
+			}
+			memcpy(out + bt.addr[g_hl_int], nbuf, 4096);
+			free(nbuf);
+		}
+		free(leafblk);
 
 		put32(h + 8, ID_SZ_L);
 		put32(h + 12, 0x80);
 		put32(h + 16, 0);
 		memcpy(out + bt.addr[ID_SZ_H], h, 21);
-		l = calloc(1, 128);
-		put16(l, 1);
-		memcpy(out + bt.addr[ID_SZ_L], l, 128);
-		free(l);
-
+		{
+			unsigned char *l = calloc(1, 128);
+			put16(l, 1);
+			memcpy(out + bt.addr[ID_SZ_L], l, 128);
+			free(l);
+		}
 		put32(h + 8, ID_MT_L);
 		put32(h + 12, 0x1000);
 		put32(h + 16, 0);
 		memcpy(out + bt.addr[ID_MT_H], h, 21);
-		l = calloc(1, 4096);
-		put16(l, 1);
-		memcpy(out + bt.addr[ID_MT_L], l, 4096);
-		free(l);
-
+		{
+			unsigned char *l = calloc(1, 4096);
+			put16(l, 1);
+			memcpy(out + bt.addr[ID_MT_L], l, 4096);
+			free(l);
+		}
 		memset(h, 0, sizeof(h));
 		put32(h, 1);
 		put32(h + 4, 7);
 		put32(h + 8, 0);
 		h[12] = 0;
 		memcpy(out + bt.addr[ID_VIX], h, 13);
-	}
-
-	/* BomInfo */
+	}	/* BomInfo */
 	{
 		unsigned char *bi = calloc(12 + 16 * ninfo, 1);
 		uint32_t plainsize = 0, fsum = 0;
@@ -944,6 +1170,15 @@ bm_pkg_build(const char *root, size_t *out_len)
 			for (i = 0; i < pool; i++) {
 				uint32_t a = (i >= 1 && i <= bt.nblocks) ? bt.addr[i] : 0;
 				uint32_t s = (i >= 1 && i <= bt.nblocks) ? bt.size[i] : 0;
+				/* The first index copy is built before the HLIndex
+				 * tree pages are allocated, so its entries for them
+				 * are still zero. */
+				if (c == 0) {
+					uint32_t h;
+					for (h = 1; h < g_hl_nl; h++)
+						if (i == g_hl_leaf[h]) { a = 0; s = 0; }
+					if (g_hl_int && i == g_hl_int) { a = 0; s = 0; }
+				}
 				put32(out + off + 4 + 8 * i, a);
 				put32(out + off + 4 + 8 * i + 4, s);
 			}
@@ -969,6 +1204,8 @@ bm_pkg_build(const char *root, size_t *out_len)
 	put32(out + 28, 60);
 
 done:
+	bom_btree_plan_free(&pplan);
+	bom_btree_plan_free(&hplan);
 	for (i = 0; i < n; i++) {
 		free(ents[i].name);
 		free(ents[i].rel);

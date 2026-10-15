@@ -50,48 +50,35 @@ static int leafsim_push_sorted(btree_leafsim *L, uint32_t r) {
     return 0;
 }
 
-int bom_btree_plan(const btree_key *keys, size_t nrows,
-                   const uint32_t *insertion_order, btree_plan *out) {
-    btree_keyref *keyref = NULL;
-    uint32_t *rinv = NULL;
+/* Shared simulation core.  rinv[idx] must map every key idx to its 0-based
+ * rank in the sorted order (a permutation of 0..n-1).  The array is owned by
+ * the caller and is not modified. */
+static int
+plan_core(size_t n, const uint32_t *rinv,
+          const uint32_t *insertion_order, btree_plan *out) {
     btree_leafsim *leaves = NULL;
     uint32_t *chain = NULL;
     btree_split *splits = NULL;
     uint32_t *sorted = NULL, *leaf_of = NULL;
     btree_leaf *leaf = NULL;
-    size_t n = nrows;
     size_t nleaf = 1;
     size_t nsplits = 0;
     size_t space = n ? n : 1;
     size_t i, j;
     int rc = -1;
 
-    if (out == NULL || (n != 0 && keys == NULL))
-        return -1;
-    memset(out, 0, sizeof(*out));
-
-    keyref = (btree_keyref *)malloc(space * sizeof(btree_keyref));
-    rinv = (uint32_t *)malloc(space * sizeof(uint32_t));
     leaves = (btree_leafsim *)calloc(space, sizeof(btree_leafsim));
     chain = (uint32_t *)malloc(space * sizeof(uint32_t));
     splits = (btree_split *)malloc(space * sizeof(btree_split));
     sorted = (uint32_t *)malloc(space * sizeof(uint32_t));
     leaf_of = (uint32_t *)malloc(space * sizeof(uint32_t));
     leaf = (btree_leaf *)malloc(space * sizeof(btree_leaf));
-    if (keyref == NULL || rinv == NULL || leaves == NULL || chain == NULL ||
+    if (leaves == NULL || chain == NULL ||
         splits == NULL || sorted == NULL || leaf_of == NULL || leaf == NULL)
         goto out;
 
-    for (i = 0; i < n; i++) {
-        keyref[i].idx = (uint32_t)i;
-        keyref[i].parent = keys[i].parent;
-        keyref[i].name = keys[i].name;
-    }
-    qsort(keyref, n, sizeof(btree_keyref), cmp_keyref);
-    for (i = 0; i < n; i++) {
-        sorted[i] = keyref[i].idx;
-        rinv[keyref[i].idx] = (uint32_t)i;
-    }
+    for (i = 0; i < n; i++)
+        sorted[rinv[i]] = (uint32_t)i;
 
     chain[0] = 0;
     for (j = 0; j < n; j++) {
@@ -189,8 +176,6 @@ int bom_btree_plan(const btree_key *keys, size_t nrows,
     rc = 0;
 
 out:
-    free(keyref);
-    free(rinv);
     for (i = 0; i < (leaves ? space : 0); i++)
         free(leaves[i].ranks);
     free(leaves);
@@ -202,6 +187,61 @@ out:
     if (rc != 0)
         return -1;
     return 0;
+}
+
+int bom_btree_plan(const btree_key *keys, size_t nrows,
+                   const uint32_t *insertion_order, btree_plan *out) {
+    btree_keyref *keyref = NULL;
+    uint32_t *rinv = NULL;
+    size_t n = nrows;
+    size_t space = n ? n : 1;
+    size_t i;
+    int rc;
+
+    if (out == NULL || (n != 0 && keys == NULL))
+        return -1;
+    memset(out, 0, sizeof(*out));
+
+    keyref = (btree_keyref *)malloc(space * sizeof(btree_keyref));
+    rinv = (uint32_t *)malloc(space * sizeof(uint32_t));
+    if (keyref == NULL || rinv == NULL) {
+        free(keyref);
+        free(rinv);
+        return -1;
+    }
+    for (i = 0; i < n; i++) {
+        keyref[i].idx = (uint32_t)i;
+        keyref[i].parent = keys[i].parent;
+        keyref[i].name = keys[i].name;
+    }
+    qsort(keyref, n, sizeof(btree_keyref), cmp_keyref);
+    for (i = 0; i < n; i++)
+        rinv[keyref[i].idx] = (uint32_t)i;
+
+    rc = plan_core(n, rinv, insertion_order, out);
+    free(keyref);
+    free(rinv);
+    return rc;
+}
+
+int bom_btree_plan_ranks(const uint32_t *sort_rank, size_t nrows,
+                         const uint32_t *insertion_order, btree_plan *out) {
+    uint32_t *rinv = NULL;
+    size_t n = nrows;
+    size_t space = n ? n : 1;
+    int rc;
+
+    if (out == NULL || (n != 0 && sort_rank == NULL))
+        return -1;
+    memset(out, 0, sizeof(*out));
+    rinv = (uint32_t *)malloc(space * sizeof(uint32_t));
+    if (rinv == NULL)
+        return -1;
+    if (n != 0)
+        memcpy(rinv, sort_rank, n * sizeof(uint32_t));
+    rc = plan_core(n, rinv, insertion_order, out);
+    free(rinv);
+    return rc;
 }
 
 void bom_btree_plan_free(btree_plan *p) {
