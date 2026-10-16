@@ -19,7 +19,13 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <time.h>
+#include <limits.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <pwd.h>
+#include <grp.h>
+#include <sys/stat.h>
+#include <sys/xattr.h>
 #include <zlib.h>
 #include <CommonCrypto/CommonDigest.h>
 
@@ -122,7 +128,7 @@ zlib_compress(const void *in, size_t n, unsigned char **out, size_t *out_len)
 		return -1;
 	uLongf blen = bound;
 	int rc = compress2(buf, &blen, (const Bytef *)in, (uLong)n,
-	    Z_DEFAULT_COMPRESSION);
+	    Z_BEST_COMPRESSION);	/* pkgbuild uses level 9 */
 	if (rc != Z_OK) {
 		free(buf);
 		return -1;
@@ -145,94 +151,318 @@ sha1_hex(const void *data, size_t len, char out[41])
 	out[40] = '\0';
 }
 
+/* ISO-8601 UTC timestamp; the archive <creation-time> omits the trailing Z
+ * while the per-file ctime/mtime/atime include it, matching pkgbuild. */
 static void
-utc_timestamp(char *out, size_t n)
+iso_time(time_t t, int with_z, char *out, size_t n)
 {
-	time_t t = time(NULL);
 	struct tm tm;
 	gmtime_r(&t, &tm);
-	strftime(out, n, "%Y-%m-%dT%H:%M:%SZ", &tm);
+	strftime(out, n, with_z ? "%Y-%m-%dT%H:%M:%SZ" : "%Y-%m-%dT%H:%M:%S",
+	    &tm);
+}
+
+/* --- on-disk metadata --- */
+
+int
+xar_entry_set_data_file(struct xar_entry *e, const void *data, size_t len)
+{
+	const char *dir = getenv("TMPDIR");
+	char path[PATH_MAX];
+	char names[1024];
+	int fd;
+	struct stat st;
+	ssize_t nl;
+
+	e->data = data;
+	e->size = len;
+	e->has_attr = 0;
+	e->nxattr = 0;
+
+	/*
+	 * Create the file in $TMPDIR, as pkgbuild does.  On macOS a new file
+	 * inherits its directory's group, so /tmp would yield group wheel
+	 * (gid 0) while the per-user TMPDIR yields the user's own group
+	 * (staff, gid 20), which is what shows up in the TOC.
+	 */
+	if (dir == NULL || *dir == '\0')
+		dir = "/tmp/";
+	snprintf(path, sizeof path, "%s%s.pkgbuild-XXXXXX", dir,
+	    dir[strlen(dir) - 1] == '/' ? "" : "/");
+	fd = mkstemp(path);
+	if (fd < 0)
+		return -1;
+	if (len > 0 && write(fd, data, len) != (ssize_t)len) {
+		close(fd);
+		unlink(path);
+		return -1;
+	}
+	fchmod(fd, 0644);
+	close(fd);
+
+	if (lstat(path, &st) != 0) {
+		unlink(path);
+		return -1;
+	}
+
+	e->has_attr = 1;
+	e->mode = (uint32_t)st.st_mode;
+	e->uid = (uint32_t)st.st_uid;
+	e->gid = (uint32_t)st.st_gid;
+	e->dev = (uint64_t)st.st_dev;
+	e->ino = (uint64_t)st.st_ino;
+	e->ctime = (uint32_t)st.st_ctime;
+	e->mtime = (uint32_t)st.st_mtime;
+	e->atime = (uint32_t)st.st_atime;
+	e->birthtime = (uint32_t)st.st_birthtime;
+	{
+		struct passwd *pw = getpwuid(st.st_uid);
+		struct group *gr = getgrgid(st.st_gid);
+		snprintf(e->user, sizeof e->user, "%s",
+		    pw ? pw->pw_name : "root");
+		snprintf(e->group, sizeof e->group, "%s",
+		    gr ? gr->gr_name : "wheel");
+	}
+
+	/* Extended attributes, notably com.apple.provenance which macOS
+	 * stamps onto files created by this process. */
+	nl = listxattr(path, names, sizeof names, XATTR_NOFOLLOW);
+	if (nl > 0) {
+		char *np = names;
+		while (np < names + nl &&
+		    e->nxattr < (int)(sizeof e->xattrs / sizeof e->xattrs[0])) {
+			size_t nn = strlen(np);
+			ssize_t vl = getxattr(path, np, NULL, 0, 0,
+			    XATTR_NOFOLLOW);
+			if (vl >= 0) {
+				unsigned char *val = malloc((size_t)vl + 1);
+				char *copy = strdup(np);
+				if (val != NULL && copy != NULL &&
+				    getxattr(path, np, val, (size_t)vl, 0,
+				    XATTR_NOFOLLOW) == vl) {
+					e->xattrs[e->nxattr].name = copy;
+					e->xattrs[e->nxattr].value = val;
+					e->xattrs[e->nxattr].vlen = (size_t)vl;
+					e->nxattr++;
+				} else {
+					free(val);
+					free(copy);
+				}
+			}
+			np += nn + 1;
+		}
+	}
+
+	unlink(path);
+	return 0;
+}
+
+void
+xar_entry_free_meta(struct xar_entry *e)
+{
+	for (int k = 0; k < e->nxattr; k++) {
+		free((void *)e->xattrs[k].name);
+		free((void *)e->xattrs[k].value);
+	}
+	e->nxattr = 0;
 }
 
 /* --- public API --- */
 
+/* A heap blob: stored bytes plus the offsets/checksums the TOC needs. */
+struct blob {
+	unsigned char *p;	/* stored bytes (compressed or raw) */
+	size_t len;		/* stored length */
+	size_t usize;		/* uncompressed length */
+	size_t off;		/* heap-relative offset of stored bytes */
+	char ext[41];		/* sha1 of the uncompressed bytes */
+	char arc[41];		/* sha1 of the stored bytes */
+};
+
+static int
+comp_blob(struct blob *b, const void *data, size_t len, int compressed)
+{
+	b->usize = len;
+	if (compressed) {
+		if (zlib_compress(data, len, &b->p, &b->len) != 0)
+			return -1;
+	} else {
+		b->p = malloc(len ? len : 1);
+		if (b->p == NULL)
+			return -1;
+		memcpy(b->p, data, len);
+		b->len = len;
+	}
+	sha1_hex(data, len, b->ext);
+	sha1_hex(b->p, b->len, b->arc);
+	return 0;
+}
+
+/* Emit the <data>/<ea> body.  pkgbuild orders the fields as
+ * length,offset,size,encoding when the blob is compressed and
+ * length,encoding,offset,size when it is stored. */
+static int
+emit_data(struct sbuf *s, const char *ind, const struct blob *b,
+    const char *enc, int compressed)
+{
+	if (sbuf_printf(s, "%s<length>%zu</length>\n", ind, b->len) != 0)
+		return -1;
+	if (compressed) {
+		if (sbuf_printf(s, "%s<offset>%zu</offset>\n"
+		    "%s<size>%zu</size>\n%s<encoding style=\"%s\"/>\n",
+		    ind, b->off, ind, b->usize, ind, enc) != 0)
+			return -1;
+	} else {
+		if (sbuf_printf(s, "%s<encoding style=\"%s\"/>\n"
+		    "%s<offset>%zu</offset>\n%s<size>%zu</size>\n",
+		    ind, enc, ind, b->off, ind, b->usize) != 0)
+			return -1;
+	}
+	if (sbuf_printf(s, "%s<extracted-checksum style=\"sha1\">%s"
+	    "</extracted-checksum>\n", ind, b->ext) != 0)
+		return -1;
+	if (sbuf_printf(s, "%s<archived-checksum style=\"sha1\">%s"
+	    "</archived-checksum>\n", ind, b->arc) != 0)
+		return -1;
+	return 0;
+}
+
 unsigned char *
 xar_build(const struct xar_entry *entries, int n, size_t *out_len)
 {
-	if (n < 1) {
-		*out_len = 0;
-		return NULL;
-	}
+	struct blob *data = NULL, *ea = NULL;
+	int *eabase = NULL;
+	unsigned char *toc_z = NULL;
+	unsigned char *arch = NULL;
+	struct sbuf toc;
+	size_t toc_z_len = 0;
+	int total_ea = 0, ei = 0, rc = -1;
 
-	unsigned char **comp = calloc((size_t)n, sizeof(*comp));
-	size_t *clen = calloc((size_t)n, sizeof(*clen));
-	size_t *hoff = calloc((size_t)n, sizeof(*hoff));
-	if (comp == NULL || clen == NULL || hoff == NULL)
-		goto fail;
+	*out_len = 0;
+	if (n < 1)
+		return NULL;
+
+	for (int i = 0; i < n; i++)
+		total_ea += entries[i].nxattr;
+
+	data = calloc((size_t)n, sizeof(*data));
+	eabase = calloc((size_t)n, sizeof(*eabase));
+	ea = calloc((size_t)(total_ea ? total_ea : 1), sizeof(*ea));
+	if (data == NULL || eabase == NULL || ea == NULL)
+		goto out;
 
 	size_t heap_off = 20;	/* 20-byte sha1(toc_z) checksum lives first */
 	for (int i = 0; i < n; i++) {
 		const struct xar_entry *e = &entries[i];
-		if (e->compressed) {
-			if (zlib_compress(e->data, e->size, &comp[i], &clen[i]) != 0)
-				goto fail;
-		} else {
-			comp[i] = malloc(e->size);
-			if (comp[i] == NULL)
-				goto fail;
-			memcpy(comp[i], e->data, e->size);
-			clen[i] = e->size;
+		if (comp_blob(&data[i], e->data, e->size, e->compressed) != 0)
+			goto out;
+		eabase[i] = ei;
+		for (int k = 0; k < e->nxattr; k++) {
+			if (comp_blob(&ea[ei], e->xattrs[k].value,
+			    e->xattrs[k].vlen, e->compressed) != 0)
+				goto out;
+			ei++;
 		}
-		hoff[i] = heap_off;
-		heap_off += clen[i];
 	}
-
-	/* Build the table of contents. */
-	char ts[32];
-	utc_timestamp(ts, sizeof ts);
-
-	struct sbuf toc;
-	unsigned char *toc_z = NULL;
-	size_t toc_z_len = 0;
-	sbuf_init(&toc);
-	if (sbuf_printf(&toc,
-	    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-	    "<xar>\n"
-	    " <toc>\n"
-	    "  <creation-time>%s</creation-time>\n"
-	    "  <checksum style=\"sha1\"><offset>0</offset><size>20</size></checksum>\n",
-	    ts) != 0)
-		goto fail_toc;
-
+	/* Each entry's xattrs precede its data in the heap; entries are laid
+	 * out in id order (the TOC lists them in reverse). */
 	for (int i = 0; i < n; i++) {
-		const struct xar_entry *e = &entries[i];
-		char ext[41], arc[41];
-		sha1_hex(e->data, e->size, ext);
-		sha1_hex(comp[i], clen[i], arc);
-		if (sbuf_printf(&toc,
-		    "  <file id=\"%d\"><data><length>%zu</length><offset>%zu</offset>"
-		    "<size>%zu</size><encoding style=\"%s\"/>"
-		    "<extracted-checksum style=\"sha1\">%s</extracted-checksum>"
-		    "<archived-checksum style=\"sha1\">%s</archived-checksum>"
-		    "</data><mode>0644</mode><type>file</type><name>%s</name></file>\n",
-		    i + 1, clen[i], hoff[i], e->size, e->encoding, ext, arc,
-		    e->name) != 0)
-			goto fail_toc;
+		for (int k = 0; k < entries[i].nxattr; k++) {
+			ea[eabase[i] + k].off = heap_off;
+			heap_off += ea[eabase[i] + k].len;
+		}
+		data[i].off = heap_off;
+		heap_off += data[i].len;
 	}
-	if (sbuf_cat(&toc, " </toc>\n</xar>\n", strlen(" </toc>\n</xar>\n")) != 0)
-		goto fail_toc;
+
+	sbuf_init(&toc);
+	{
+		char ct[32];
+		iso_time(time(NULL), 0, ct, sizeof ct);
+		if (sbuf_printf(&toc,
+		    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+		    "<xar>\n"
+		    " <toc>\n"
+		    "  <creation-time>%s</creation-time>\n"
+		    "  <checksum style=\"sha1\">\n"
+		    "   <offset>0</offset>\n"
+		    "   <size>20</size>\n"
+		    "  </checksum>\n", ct) != 0)
+			goto out_sbuf;
+	}
+	for (int idx = n - 1; idx >= 0; idx--) {
+		const struct xar_entry *e = &entries[idx];
+		if (sbuf_printf(&toc, "  <file id=\"%d\">\n   <data>\n",
+		    idx + 1) != 0)
+			goto out_sbuf;
+		if (emit_data(&toc, "    ", &data[idx], e->encoding,
+		    e->compressed) != 0)
+			goto out_sbuf;
+		if (sbuf_cat(&toc, "   </data>\n", strlen("   </data>\n")) != 0)
+			goto out_sbuf;
+		for (int k = 0; k < e->nxattr; k++) {
+			if (sbuf_printf(&toc, "   <ea id=\"%d\">\n", k) != 0)
+				goto out_sbuf;
+			if (emit_data(&toc, "    ", &ea[eabase[idx] + k],
+			    e->encoding, e->compressed) != 0)
+				goto out_sbuf;
+			if (sbuf_printf(&toc, "    <name>%s</name>\n"
+			    "   </ea>\n", e->xattrs[k].name) != 0)
+				goto out_sbuf;
+		}
+		if (e->has_attr) {
+			char c[32], m[32], a[32];
+			struct tm bt;
+			time_t btime = (time_t)e->birthtime;
+			gmtime_r(&btime, &bt);
+			if (sbuf_printf(&toc,
+			    "   <FinderCreateTime>\n"
+			    "    <nanoseconds>0</nanoseconds>\n"
+			    "    <time>1900-01-00T%02d:%02d:%02d</time>\n"
+			    "   </FinderCreateTime>\n",
+			    bt.tm_hour, bt.tm_min, bt.tm_sec) != 0)
+				goto out_sbuf;
+			iso_time((time_t)e->ctime, 1, c, sizeof c);
+			iso_time((time_t)e->mtime, 1, m, sizeof m);
+			iso_time((time_t)e->atime, 1, a, sizeof a);
+			if (sbuf_printf(&toc,
+			    "   <ctime>%s</ctime>\n"
+			    "   <mtime>%s</mtime>\n"
+			    "   <atime>%s</atime>\n"
+			    "   <group>%s</group>\n"
+			    "   <gid>%u</gid>\n"
+			    "   <user>%s</user>\n"
+			    "   <uid>%u</uid>\n"
+			    "   <mode>%04o</mode>\n"
+			    "   <deviceno>%llu</deviceno>\n"
+			    "   <inode>%llu</inode>\n",
+			    c, m, a, e->group, e->gid, e->user, e->uid,
+			    (unsigned)(e->mode & 07777u),
+			    (unsigned long long)e->dev,
+			    (unsigned long long)e->ino) != 0)
+				goto out_sbuf;
+		}
+		if (sbuf_printf(&toc,
+		    "   <type>file</type>\n   <name>%s</name>\n  </file>\n",
+		    e->name) != 0)
+			goto out_sbuf;
+	}
+	if (sbuf_cat(&toc, " </toc>\n</xar>\n",
+	    strlen(" </toc>\n</xar>\n")) != 0)
+		goto out_sbuf;
 
 	/* Compress the TOC; the archive checksum is sha1 of the compressed TOC. */
 	if (zlib_compress(toc.buf, toc.len, &toc_z, &toc_z_len) != 0)
-		goto fail_toc;
+		goto out_sbuf;
 
 	unsigned char chk[20];
 	CC_SHA1(toc_z, (CC_LONG)toc_z_len, chk);
 
-	size_t arch_len = 28 + toc_z_len + 20 + heap_off - 20;
-	unsigned char *arch = malloc(arch_len);
+	size_t heap_start = 28 + toc_z_len;
+	size_t arch_len = heap_start + heap_off;
+	arch = malloc(arch_len);
 	if (arch == NULL)
-		goto fail_arch;
+		goto out_sbuf;
 
 	uint32_t toclen_u = (uint32_t)toc.len;
 	uint32_t toczlen_u = (uint32_t)toc_z_len;
@@ -247,32 +477,39 @@ xar_build(const struct xar_entry *entries, int n, size_t *out_len)
 	put_be32(arch + p, 1); p += 4;		/* checksum style: sha1 */
 
 	memcpy(arch + p, toc_z, toc_z_len); p += toc_z_len;
-	memcpy(arch + p, chk, 20); p += 20;
+	memcpy(arch + p, chk, 20);
 	for (int i = 0; i < n; i++) {
-		memcpy(arch + p, comp[i], clen[i]);
-		p += clen[i];
+		for (int k = 0; k < entries[i].nxattr; k++) {
+			const struct blob *xb = &ea[eabase[i] + k];
+			memcpy(arch + heap_start + xb->off, xb->p, xb->len);
+		}
+		memcpy(arch + heap_start + data[i].off, data[i].p, data[i].len);
 	}
 
 	*out_len = arch_len;
+	rc = 0;
 
-	for (int i = 0; i < n; i++)
-		free(comp[i]);
-	free(comp); free(clen); free(hoff);
+out_sbuf:
 	sbuf_free(&toc);
+out:
 	free(toc_z);
+	if (data != NULL) {
+		for (int i = 0; i < n; i++)
+			free(data[i].p);
+		free(data);
+	}
+	if (ea != NULL) {
+		for (int i = 0; i < ei; i++)
+			free(ea[i].p);
+		free(ea);
+	}
+	free(eabase);
+	if (rc != 0) {
+		free(arch);
+		*out_len = 0;
+		return NULL;
+	}
 	return arch;
-
-fail_arch:
-	free(arch);
-fail_toc:
-	free(toc_z);
-	sbuf_free(&toc);
-fail:
-	for (int i = 0; i < n; i++)
-		free(comp[i]);
-	free(comp); free(clen); free(hoff);
-	*out_len = 0;
-	return NULL;
 }
 
 int
@@ -292,7 +529,7 @@ xar_dump(const unsigned char *pkg, size_t len)
 	uLongf tlen = (uLongf)toc_len;
 	if (tlen == 0)
 		tlen = (uLongf)(len - 28);
-	toc = malloc(tlen > 1024 ? tlen : 1024);
+	toc = malloc((size_t)tlen + 1);
 	if (toc == NULL)
 		return -1;
 	uLongf blen = tlen;
@@ -301,21 +538,39 @@ xar_dump(const unsigned char *pkg, size_t len)
 		fprintf(stderr, "xar: failed to decompress table of contents\n");
 		return -1;
 	}
+	toc[blen] = '\0';
 
-	/* Naive scan for <name>...</name> entries. */
+	/*
+	 * Print one line per <file> entry.  The file's own <name> is the last
+	 * one inside the block: extended attributes carry <name> elements too
+	 * (e.g. com.apple.provenance), which must not show up as files.
+	 */
 	char *toc_s = (char *)toc;
 	char *p = toc_s;
 	for (;;) {
-		char *n = strstr(p, "<name>");
-		if (n == NULL)
+		char *fs = strstr(p, "<file ");
+		if (fs == NULL)
 			break;
-		n += 6;
-		char *e = strstr(n, "</name>");
-		if (e == NULL)
-			break;
-		*e = '\0';
-		printf("%s\n", n);
-		p = e + 7;
+		char *fe = strstr(fs + 6, "<file ");
+		if (fe == NULL)
+			fe = toc_s + blen;
+
+		char *name = NULL;
+		char *q = fs;
+		while (q < fe) {
+			char *nm = strstr(q, "<name>");
+			if (nm == NULL || nm >= fe)
+				break;
+			name = nm;
+			q = nm + 6;
+		}
+		if (name != NULL) {
+			char *end = strstr(name + 6, "</name>");
+			if (end != NULL && end <= fe)
+				printf("%.*s\n", (int)(end - (name + 6)),
+				    name + 6);
+		}
+		p = fe;
 	}
 	free(toc);
 	return 0;

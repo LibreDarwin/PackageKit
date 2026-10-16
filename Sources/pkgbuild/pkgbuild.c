@@ -263,9 +263,14 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	/* Assemble the xar archive. */
+	/*
+	 * Assemble the xar archive.  pkgbuild materialises the BOM, Payload
+	 * and Scripts as files on disk, so their TOC entries carry stat() and
+	 * extended-attribute metadata, whereas PackageInfo is added from
+	 * memory and carries only data/type/name.
+	 */
 	int nent = 3;
-	struct xar_entry *entries = malloc(4 * sizeof(*entries));
+	struct xar_entry *entries = calloc(4, sizeof(*entries));
 	if (entries == NULL) {
 		fprintf(stderr, "%s: out of memory\n", program_name);
 		free(pkginfo);
@@ -275,15 +280,17 @@ main(int argc, char **argv)
 	}
 	entries[0].name = "Bom";
 	entries[0].encoding = "application/x-gzip";
-	entries[0].data = bom;
-	entries[0].size = bom_len;
 	entries[0].compressed = 1;
+	if (xar_entry_set_data_file(&entries[0], bom, bom_len) != 0)
+		fprintf(stderr, "%s: warning: no metadata for Bom\n",
+		    program_name);
 
 	entries[1].name = "Payload";
 	entries[1].encoding = "application/octet-stream";
-	entries[1].data = pl.data;
-	entries[1].size = pl.size;	/* stored raw: <size> == bytes stored == gzip length */
-	entries[1].compressed = 0;
+	entries[1].compressed = 0;	/* payload is already gzip-compressed */
+	if (xar_entry_set_data_file(&entries[1], pl.data, pl.size) != 0)
+		fprintf(stderr, "%s: warning: no metadata for Payload\n",
+		    program_name);
 
 	entries[2].name = "PackageInfo";
 	entries[2].encoding = "application/x-gzip";
@@ -297,9 +304,11 @@ main(int argc, char **argv)
 		if (payload_build(scripts_dir, &scripts) == 0) {
 			entries[3].name = "Scripts";
 			entries[3].encoding = "application/octet-stream";
-			entries[3].data = scripts.data;
-			entries[3].size = scripts.size;
 			entries[3].compressed = 0;
+			if (xar_entry_set_data_file(&entries[3],
+			    scripts.data, scripts.size) != 0)
+				fprintf(stderr, "%s: warning: no metadata for Scripts\n",
+				    program_name);
 			nent = 4;
 		} else {
 			fprintf(stderr, "%s: failed to build Scripts archive\n",
@@ -309,6 +318,8 @@ main(int argc, char **argv)
 
 	size_t arch_len = 0;
 	unsigned char *arch = xar_build(entries, nent, &arch_len);
+	for (int i = 0; i < nent; i++)
+		xar_entry_free_meta(&entries[i]);
 	free(pkginfo);
 	free(bom);
 	free(pl.data);
