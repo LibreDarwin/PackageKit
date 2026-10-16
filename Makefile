@@ -34,7 +34,7 @@ PROD := $(BUILD_DIR)/productbuild
 PROD_OBJS := $(OBJDIR)/productbuild/productbuild.o \
 	$(OBJDIR)/productbuild/analyze.o $(OBJDIR)/productbuild/bom.o \
 	$(OBJDIR)/productbuild/dist.o $(OBJDIR)/productbuild/payload.o \
-	$(OBJDIR)/productbuild/xar.o \
+	$(OBJDIR)/productbuild/xar.o $(OBJDIR)/pkgbuild/bundles.o \
 	$(OBJDIR)/pkgbuild/bomlib/bom_btree.o $(OBJDIR)/pkgbuild/bomlib/bom_cksum.o \
 	$(OBJDIR)/pkgbuild/bomlib/bom_writer.o $(OBJDIR)/pkgbuild/bomlib/fs_walk.o \
 	$(OBJDIR)/pkgbuild/bomlib/bomstor.o $(OBJDIR)/pkgbuild/bomlib/bom_pkg.o
@@ -104,21 +104,21 @@ $(OBJDIR)/pkgbuild/bomlib/bom_pkg.o: Sources/pkgbuild/bomlib/bom_pkg.c Sources/p
 
 # productbuild
 
-$(OBJDIR)/productbuild/productbuild.o: Sources/productbuild/productbuild.c Sources/productbuild/xar.h Sources/productbuild/analyze.h Sources/productbuild/payload.h Sources/productbuild/bom.h Sources/productbuild/dist.h
+$(OBJDIR)/productbuild/productbuild.o: Sources/productbuild/productbuild.c Sources/productbuild/xar.h Sources/productbuild/analyze.h Sources/productbuild/payload.h Sources/productbuild/bom.h Sources/productbuild/dist.h Sources/pkgbuild/bundles.h
 	@mkdir -p $(OBJDIR)/productbuild
-	$(CC) $(CFLAGS) -c -o $@ Sources/productbuild/productbuild.c
+	$(CC) $(CFLAGS) -ISources/pkgbuild -c -o $@ Sources/productbuild/productbuild.c
 
-$(OBJDIR)/productbuild/analyze.o: Sources/productbuild/analyze.c Sources/productbuild/analyze.h
+$(OBJDIR)/productbuild/analyze.o: Sources/productbuild/analyze.c Sources/productbuild/analyze.h Sources/pkgbuild/bundles.h
 	@mkdir -p $(OBJDIR)/productbuild
-	$(CC) $(CFLAGS) -c -o $@ Sources/productbuild/analyze.c
+	$(CC) $(CFLAGS) -ISources/pkgbuild -c -o $@ Sources/productbuild/analyze.c
 
 $(OBJDIR)/productbuild/bom.o: Sources/productbuild/bom.c Sources/productbuild/bom.h Sources/pkgbuild/bomlib/bom_pkg.h
 	@mkdir -p $(OBJDIR)/productbuild
 	$(CC) $(CFLAGS) -ISources/pkgbuild -c -o $@ Sources/productbuild/bom.c
 
-$(OBJDIR)/productbuild/dist.o: Sources/productbuild/dist.c Sources/productbuild/dist.h
+$(OBJDIR)/productbuild/dist.o: Sources/productbuild/dist.c Sources/productbuild/dist.h Sources/pkgbuild/bundles.h
 	@mkdir -p $(OBJDIR)/productbuild
-	$(CC) $(CFLAGS) -c -o $@ Sources/productbuild/dist.c
+	$(CC) $(CFLAGS) -ISources/pkgbuild -c -o $@ Sources/productbuild/dist.c
 
 $(OBJDIR)/productbuild/payload.o: Sources/productbuild/payload.c Sources/productbuild/payload.h
 	@mkdir -p $(OBJDIR)/productbuild

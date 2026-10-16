@@ -38,6 +38,7 @@
 #include "bom.h"
 #include "analyze.h"
 #include "dist.h"
+#include "bundles.h"
 
 #define PRODUCTBUILD_VERSION "0.1.0"
 
@@ -168,12 +169,150 @@ sign_package(const char *path, const char *identity)
 	    WIFEXITED(status) ? WEXITSTATUS(status) : -1);
 }
 
+/* --- bundle component helpers --- */
+
+/*
+ * Normalize a marketing version to the three-part form Apple records in
+ * the component's PackageInfo ("2.3" -> "2.3.0").  Caller frees.
+ */
+static char *
+normalize_version(const char *v)
+{
+	if (v == NULL)
+		return strdup("0.0.0");
+
+	int dots = 0;
+	for (const char *p = v; *p != '\0'; p++)
+		if (*p == '.')
+			dots++;
+
+	size_t len = strlen(v);
+	size_t extra = 0;
+	while (dots++ < 2)
+		extra += 2;
+
+	char *r = malloc(len + extra + 1);
+	if (r == NULL)
+		return NULL;
+	memcpy(r, v, len);
+	for (size_t i = 0; i < extra; i += 2) {
+		r[len + i] = '.';
+		r[len + i + 1] = '0';
+	}
+	r[len + extra] = '\0';
+	return r;
+}
+
+/*
+ * The human-facing component name (productbuild --component title): the
+ * bundle's base name with any ".app" suffix removed.  Caller frees.
+ */
+static char *
+bundle_title(const char *path)
+{
+	const char *base = strrchr(path, '/');
+	base = base ? base + 1 : path;
+	size_t len = strlen(base);
+	if (len > 4 && strcmp(base + len - 4, ".app") == 0)
+		len -= 4;
+	char *r = malloc(len + 1);
+	if (r == NULL)
+		return NULL;
+	memcpy(r, base, len);
+	r[len] = '\0';
+	return r;
+}
+
+/* Count real filesystem entries under root, excluding "." and any
+ * AppleDouble sidecars (which is the numberOfFiles Apple reports for
+ * --component packages). */
+static int
+count_real_entries(const char *root)
+{
+	DIR *d = opendir(root);
+	if (d == NULL)
+		return 0;
+
+	int n = 0;
+	struct dirent *de;
+	while ((de = readdir(d)) != NULL) {
+		if (strcmp(de->d_name, ".") == 0 ||
+		    strcmp(de->d_name, "..") == 0 ||
+		    strncmp(de->d_name, "._", 2) == 0)
+			continue;
+		n++;
+
+		char child[PATH_MAX];
+		struct stat st;
+		if (snprintf(child, sizeof child, "%s/%s", root,
+		    de->d_name) >= (int)sizeof child)
+			continue;
+		if (lstat(child, &st) == 0 && S_ISDIR(st.st_mode) &&
+		    !S_ISLNK(st.st_mode))
+			n += count_real_entries(child);
+	}
+	closedir(d);
+	return n;
+}
+
+/*
+ * Copy a bundle into a fresh staging dir as <basename> so the component
+ * payload/root begins at the bundle wrapper (matching productbuild
+ * --component).  Uses ditto(1) to preserve modes, times and xattrs.
+ * On success *out_stage is the staging root (caller remove_tree's it).
+ */
+static int
+stage_bundle(const char *bundle, char **out_stage)
+{
+	char tmpl[] = "/tmp/productbuild-comp.XXXXXX";
+	char *stage = mkdtemp(tmpl);
+	if (stage == NULL) {
+		fprintf(stderr, "%s: cannot create staging dir\n", program_name);
+		return -1;
+	}
+
+	const char *base = strrchr(bundle, '/');
+	base = base ? base + 1 : bundle;
+
+	char dst[PATH_MAX];
+	if (snprintf(dst, sizeof dst, "%s/%s", stage, base) >= (int)sizeof dst) {
+		remove_tree(stage);
+		return -1;
+	}
+
+	pid_t pid = fork();
+	if (pid < 0) {
+		remove_tree(stage);
+		return -1;
+	}
+	if (pid == 0) {
+		execlp("ditto", "ditto", bundle, dst, (char *)NULL);
+		_exit(127);
+	}
+	int status = 0;
+	waitpid(pid, &status, 0);
+	if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0)) {
+		fprintf(stderr, "%s: cannot stage bundle %s\n", program_name,
+		    bundle);
+		remove_tree(stage);
+		return -1;
+	}
+
+	*out_stage = strdup(stage);
+	if (*out_stage == NULL) {
+		remove_tree(stage);
+		return -1;
+	}
+	return 0;
+}
+
 /* --- build a component package's Bom/Payload/PackageInfo in memory --- */
 
 static int
 build_component_pkg(const char *root, const char *identifier,
     const char *version, const char *install_location, int content_mode,
-    const char *scripts_dir,
+    const char *scripts_dir, const struct bundle_components *bundles,
+    int component_mode,
     unsigned char **out_bom, size_t *out_bom_len,
     struct payload *out_pl,
     char **out_pkginfo, size_t *out_pkginfo_len,
@@ -196,13 +335,25 @@ build_component_pkg(const char *root, const char *identifier,
 		return -1;
 	}
 
-	size_t install_kbytes = pl.install_kbytes;
-	if (install_kbytes == 0)
-		install_kbytes = 1;
+	/* --component packages count real entries (excluding "." and the
+	 * AppleDouble sidecars) and always report 0 installKBytes; plain
+	 * roots count cpio records and report at least 1 KB. */
+	int number_of_files;
+	size_t install_kbytes;
+	if (component_mode) {
+		number_of_files = count_real_entries(root);
+		install_kbytes = 0;
+	} else {
+		number_of_files = pl.file_count;
+		install_kbytes = pl.install_kbytes;
+		if (install_kbytes == 0)
+			install_kbytes = 1;
+	}
 
 	size_t pi_len = 0;
 	char *pkginfo = pkginfo_build(identifier, version, install_location,
-	    content_mode, scripts_dir, pl.file_count, install_kbytes, &pi_len);
+	    content_mode, scripts_dir, number_of_files, install_kbytes,
+	    bundles, component_mode, &pi_len);
 	if (pkginfo == NULL) {
 		fprintf(stderr, "%s: failed to build PackageInfo\n", program_name);
 		free(pl.data);
@@ -322,7 +473,8 @@ static int build_from_distribution(const char *dist_path,
 static int
 build_root(const char *root, const char *install_path,
     const char *identifier, const char *version, const char *scripts_dir,
-    int content_mode, const char *out, const char *sign_identity)
+    int content_mode, int component_mode, const char *out,
+    const char *sign_identity)
 {
 	unsigned char *bom = NULL;
 	size_t bom_len = 0;
@@ -330,36 +482,94 @@ build_root(const char *root, const char *install_path,
 	char *pkginfo = NULL;
 	size_t pkginfo_len = 0;
 	size_t install_kbytes = 0;
+	char *stage = NULL;
 
-	/* With no --identifier, productbuild derives the component identifier
-	 * from the base name of the root directory (e.g. /path/to/root ->
-	 * "root"); the component package is <identifier>.pkg.  The default
-	 * component version is "0". */
-	const char *id = identifier;
-	if (id == NULL || *id == '\0') {
-		const char *base = strrchr(root, '/');
-		id = base ? base + 1 : root;
+	/* --component stages the bundle under a fresh root so the payload
+	 * begins at the bundle wrapper, exactly as productbuild does. */
+	const char *src = root;
+	if (component_mode) {
+		if (stage_bundle(root, &stage) != 0)
+			return 1;
+		src = stage;
 	}
-	const char *ver = version ? version : "0";
+
+	struct bundle_components *bundles = bundles_for_root(src);
+
+	/* With no --identifier, a component derives its identifier from the
+	 * bundle's CFBundleIdentifier; otherwise from the base name of the
+	 * root directory (e.g. /path/to/root -> "root").  The component
+	 * package is <identifier>.pkg. */
+	const char *id = identifier;
+	char *id_owned = NULL;
+	if (id == NULL || *id == '\0') {
+		if (component_mode && bundles->n > 0 &&
+		    bundles->v[0].identifier != NULL &&
+		    bundles->v[0].identifier[0] != '\0') {
+			id_owned = strdup(bundles->v[0].identifier);
+			id = id_owned;
+		} else {
+			const char *base = strrchr(root, '/');
+			id = base ? base + 1 : root;
+		}
+	}
+
+	const char *short_version = NULL;
+	char *ver_owned = NULL;
+	char *title_owned = NULL;
+	const char *title = NULL;
+	const char *ver;
+
+	if (component_mode) {
+		if (bundles->n > 0)
+			short_version = bundles->v[0].short_version;
+		if (version != NULL)
+			ver = version;
+		else if (short_version != NULL) {
+			ver_owned = normalize_version(short_version);
+			ver = ver_owned ? ver_owned : "0";
+		} else
+			ver = "0";
+		title_owned = bundle_title(root);
+		title = title_owned;
+	} else {
+		ver = version ? version : "0";
+	}
 
 	char pkg_dir[PATH_MAX];
 	snprintf(pkg_dir, sizeof pkg_dir, "%s.pkg", id);
 
-	if (build_component_pkg(root, id, ver, install_path, content_mode,
-	    scripts_dir, &bom, &bom_len, &pl, &pkginfo, &pkginfo_len,
-	    &install_kbytes) != 0)
+	if (build_component_pkg(src, id, ver, install_path, content_mode,
+	    scripts_dir, bundles, component_mode, &bom, &bom_len, &pl, &pkginfo,
+	    &pkginfo_len, &install_kbytes) != 0) {
+		free(id_owned);
+		free(ver_owned);
+		free(title_owned);
+		bundles_free(bundles);
+		if (stage != NULL) {
+			remove_tree(stage);
+			free(stage);
+		}
 		return 1;
+	}
 
 	char *dist = NULL;
 	size_t dist_len = 0;
-	dist = dist_synthesize(id, ver, pkg_dir, install_path,
-	    install_kbytes, NULL, &dist_len);
+	dist = dist_synthesize(id, ver, short_version, title, pkg_dir,
+	    install_path, bundles, install_kbytes, NULL, &dist_len);
 	if (dist == NULL) {
 		fprintf(stderr, "%s: failed to synthesize Distribution\n",
 		    program_name);
 		free(pkginfo);
 		free(bom);
 		free(pl.data);
+		free(id_owned);
+		free(ver_owned);
+		free(title_owned);
+		bundles_free(bundles);
+		if (stage != NULL) {
+			remove_tree(stage);
+			free(stage);
+		}
 		return 1;
 	}
 
@@ -370,6 +580,14 @@ build_root(const char *root, const char *install_path,
 	free(pkginfo);
 	free(bom);
 	free(pl.data);
+	free(id_owned);
+	free(ver_owned);
+	free(title_owned);
+	bundles_free(bundles);
+	if (stage != NULL) {
+		remove_tree(stage);
+		free(stage);
+	}
 
 	if (rc == 0)
 		fprintf(stderr, "productbuild: %s\n", out);
@@ -515,7 +733,7 @@ main(int argc, char **argv)
 	if (content != NULL) {
 		out = argv[optind];
 		int rc = build_root(content, NULL, identifier,
-		    version, scripts_dir, 1, out, sign_identity);
+		    version, scripts_dir, 1, 0, out, sign_identity);
 		pkg_list_free(&pkgs);
 		return rc;
 	}
@@ -529,7 +747,7 @@ main(int argc, char **argv)
 			out_path = argv[optind + 1];
 		}
 		int rc = build_root(component, install_path, identifier,
-		    version, scripts_dir, 0, out_path, sign_identity);
+		    version, scripts_dir, 0, 1, out_path, sign_identity);
 		pkg_list_free(&pkgs);
 		return rc;
 	}
@@ -543,7 +761,7 @@ main(int argc, char **argv)
 			out_path = argv[optind + 1];
 		}
 		int rc = build_root(root, install_path, identifier,
-		    version, scripts_dir, 0, out_path, sign_identity);
+		    version, scripts_dir, 0, 0, out_path, sign_identity);
 		pkg_list_free(&pkgs);
 		return rc;
 	}
@@ -565,7 +783,8 @@ main(int argc, char **argv)
 		char *dist = dist_synthesize(
 		    identifier ? identifier : "com.apple.unknown",
 		    version ? version : "1.0",
-		    pkgs.items[0], out_path, 1, NULL, &dist_len);
+		    NULL, NULL, pkgs.items[0], out_path, NULL, 1, NULL,
+		    &dist_len);
 		if (dist == NULL) {
 			fprintf(stderr, "%s: failed to synthesize Distribution\n",
 			    program_name);
@@ -723,9 +942,9 @@ synthesize_from_packages(struct pkg_list *pkgs,
 	char *dist = dist_synthesize(pkg_id[0] ? pkg_id :
 	    (identifier ? identifier : "com.apple.unknown"),
 	    version ? version : "1.0",
-	    base,
+	    NULL, NULL, base,
 	    install_loc[0] ? install_loc : NULL,
-	    1, NULL, &dist_len);
+	    NULL, 1, NULL, &dist_len);
 	if (dist == NULL) {
 		fprintf(stderr, "%s: failed to synthesize Distribution\n",
 		    program_name);
