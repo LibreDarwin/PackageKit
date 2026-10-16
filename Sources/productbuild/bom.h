@@ -8,7 +8,7 @@
 #include <stddef.h>
 
 /*
- * Generate a BOM (Bill Of Materials) for a source root using mkbom(1).
+ * Generate a BOM (Bill Of Materials) for a source root.
  * Returns a malloc'd buffer (caller frees) or NULL on failure.
  */
 unsigned char *bom_build(const char *root, size_t *out_len);
