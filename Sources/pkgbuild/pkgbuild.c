@@ -292,29 +292,34 @@ main(int argc, char **argv)
 		fprintf(stderr, "%s: warning: no metadata for Payload\n",
 		    program_name);
 
-	entries[2].name = "PackageInfo";
-	entries[2].encoding = "application/x-gzip";
-	entries[2].data = pkginfo;
-	entries[2].size = pkginfo_len;
-	entries[2].compressed = 1;
+	/* PackageInfo is always the highest TOC id; Scripts, when present,
+	 * sits between Payload and PackageInfo. */
+	int pkgi = 2;
 
 	struct payload scripts;
 	scripts.data = NULL;
 	if (scripts_dir != NULL) {
 		if (payload_build(scripts_dir, &scripts) == 0) {
-			entries[3].name = "Scripts";
-			entries[3].encoding = "application/octet-stream";
-			entries[3].compressed = 0;
-			if (xar_entry_set_data_file(&entries[3],
+			entries[2].name = "Scripts";
+			entries[2].encoding = "application/octet-stream";
+			entries[2].compressed = 0;
+			if (xar_entry_set_data_file(&entries[2],
 			    scripts.data, scripts.size) != 0)
 				fprintf(stderr, "%s: warning: no metadata for Scripts\n",
 				    program_name);
-			nent = 4;
+			pkgi = 3;
 		} else {
 			fprintf(stderr, "%s: failed to build Scripts archive\n",
 			    program_name);
 		}
 	}
+
+	entries[pkgi].name = "PackageInfo";
+	entries[pkgi].encoding = "application/x-gzip";
+	entries[pkgi].data = pkginfo;
+	entries[pkgi].size = pkginfo_len;
+	entries[pkgi].compressed = 1;
+	nent = pkgi + 1;
 
 	size_t arch_len = 0;
 	unsigned char *arch = xar_build(entries, nent, &arch_len);

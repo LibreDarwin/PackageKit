@@ -152,6 +152,8 @@ struct stage_ctx {
 	const char *stage;
 	struct svec *names;
 	struct svec nlinks;	/* octal link count per name, same order */
+	struct svec uids;	/* octal source uid per name, same order */
+	struct svec gids;	/* octal source gid per name, same order */
 	int *grp;		/* per name: 1 => member of a hardlink group */
 	unsigned long long *gkey;	/* per name: shared inode key */
 	int grp_n;
@@ -190,14 +192,23 @@ stage_push_ino(struct stage_ctx *ctx, int grouped, unsigned long long key)
 	return 0;
 }
 
-/* Record the source entry's link count for the next cpio record (both a
- * node and any AppleDouble sidecar shadowing it carry the source nlink). */
+/* Record the source entry's link count and ownership for the next cpio
+ * record (both a node and any AppleDouble sidecar shadowing it carry the
+ * source values).  The Payload archive zeroes uid/gid, but the Scripts
+ * archive preserves the source ownership, so record both and let
+ * odc_normalize decide. */
 static int
 stage_push_nlink(struct stage_ctx *ctx, const struct stat *st)
 {
-	char nbuf[8];
+	char nbuf[8], ubuf[8], gbuf[8];
 	snprintf(nbuf, sizeof nbuf, "%06o", (unsigned)(st->st_nlink & 0777777));
-	return svec_push(&ctx->nlinks, nbuf);
+	snprintf(ubuf, sizeof ubuf, "%06o", (unsigned)(st->st_uid & 0777777));
+	snprintf(gbuf, sizeof gbuf, "%06o", (unsigned)(st->st_gid & 0777777));
+	if (svec_push(&ctx->nlinks, nbuf) != 0)
+		return -1;
+	if (svec_push(&ctx->uids, ubuf) != 0)
+		return -1;
+	return svec_push(&ctx->gids, gbuf);
 }
 
 /* Copy the source timestamps onto a freshly created staged node so the
@@ -450,14 +461,17 @@ run_cpio(const char *stage, struct svec *names, struct buf *out)
 	return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
 }
 
-/* pkgbuild's default ownership ("recommended") records uid/gid 0/0 and the
- * source link counts, which cpio (staging into fresh nodes) cannot know.
- * Rewrite those odc (070707) header fields from the recorded source values.
- * The ino field is a fresh sequential id per record, except that entries in a
- * hardlink group (regular files with st_nlink > 1, and their sidecars) share
- * the id assigned to the group's first member. */
+/* Rewrite the odc (070707) header fields pkgbuild sets from the source, which
+ * cpio (staging into fresh nodes) cannot know.  The source link count is always
+ * restored.  Ownership is restored from the source only when preserve_owner is
+ * set (the Scripts archive); the Payload archive sanitizes uid/gid to 0/0
+ * ("recommended" ownership).  The ino field is a fresh sequential id per
+ * record, except that entries in a hardlink group (regular files with
+ * st_nlink > 1, and their sidecars) share the id assigned to the group's first
+ * member. */
 static void
-odc_normalize(struct buf *b, const struct svec *nlinks, const int *grp,
+odc_normalize(struct buf *b, const struct svec *nlinks, const struct svec *uids,
+    const struct svec *gids, int preserve_owner, const int *grp,
     const unsigned long long *gkey, int grp_n)
 {
 	struct { unsigned long long key; unsigned val; } *map = NULL;
@@ -510,8 +524,13 @@ odc_normalize(struct buf *b, const struct svec *nlinks, const int *grp,
 		snprintf(ibuf, sizeof ibuf, "%06o", val & 0777777);
 		memset(b->v + i + 6, '0', 6);	/* dev */
 		memcpy(b->v + i + 12, ibuf, 6);	/* ino */
-		memset(b->v + i + 24, '0', 6);	/* uid */
-		memset(b->v + i + 30, '0', 6);	/* gid */
+		if (preserve_owner && k < uids->n && k < gids->n) {
+			memcpy(b->v + i + 24, uids->v[k], 6);	/* uid */
+			memcpy(b->v + i + 30, gids->v[k], 6);	/* gid */
+		} else {
+			memset(b->v + i + 24, '0', 6);	/* uid */
+			memset(b->v + i + 30, '0', 6);	/* gid */
+		}
 		if (k < nlinks->n)
 			memcpy(b->v + i + 36, nlinks->v[k], 6);	/* nlink */
 		k++;
@@ -622,6 +641,12 @@ payload_build(const char *root, struct payload *out)
 	ctx.nlinks.v = NULL;
 	ctx.nlinks.n = 0;
 	ctx.nlinks.cap = 0;
+	ctx.uids.v = NULL;
+	ctx.uids.n = 0;
+	ctx.uids.cap = 0;
+	ctx.gids.v = NULL;
+	ctx.gids.n = 0;
+	ctx.gids.cap = 0;
 	ctx.grp = NULL;
 	ctx.gkey = NULL;
 	ctx.grp_n = 0;
@@ -638,7 +663,9 @@ payload_build(const char *root, struct payload *out)
 
 	if (run_cpio(stage, &names, &odc) != 0)
 		goto done;
-	odc_normalize(&odc, &ctx.nlinks, ctx.grp, ctx.gkey, ctx.grp_n);
+	/* Scripts preserve the source ownership. */
+	odc_normalize(&odc, &ctx.nlinks, &ctx.uids, &ctx.gids, 1, ctx.grp,
+	    ctx.gkey, ctx.grp_n);
 
 	unsigned char *gz = NULL;
 	size_t gzlen = 0;
@@ -656,6 +683,8 @@ done:
 	buf_free(&odc);
 	svec_free(&names);
 	svec_free(&ctx.nlinks);
+	svec_free(&ctx.uids);
+	svec_free(&ctx.gids);
 	free(ctx.grp);
 	free(ctx.gkey);
 	remove_tree(stage);
@@ -685,6 +714,12 @@ payload_stage(const char *root, char **stage_out, struct payload *out)
 	ctx.nlinks.v = NULL;
 	ctx.nlinks.n = 0;
 	ctx.nlinks.cap = 0;
+	ctx.uids.v = NULL;
+	ctx.uids.n = 0;
+	ctx.uids.cap = 0;
+	ctx.gids.v = NULL;
+	ctx.gids.n = 0;
+	ctx.gids.cap = 0;
 	ctx.grp = NULL;
 	ctx.gkey = NULL;
 	ctx.grp_n = 0;
@@ -701,7 +736,9 @@ payload_stage(const char *root, char **stage_out, struct payload *out)
 
 	if (run_cpio(stage, &names, &odc) != 0)
 		goto done;
-	odc_normalize(&odc, &ctx.nlinks, ctx.grp, ctx.gkey, ctx.grp_n);
+	/* Payload sanitizes ownership to 0/0 ("recommended"). */
+	odc_normalize(&odc, &ctx.nlinks, &ctx.uids, &ctx.gids, 0, ctx.grp,
+	    ctx.gkey, ctx.grp_n);
 
 	unsigned char *gz = NULL;
 	size_t gzlen = 0;
@@ -720,6 +757,8 @@ done:
 	buf_free(&odc);
 	svec_free(&names);
 	svec_free(&ctx.nlinks);
+	svec_free(&ctx.uids);
+	svec_free(&ctx.gids);
 	free(ctx.grp);
 	free(ctx.gkey);
 	if (rc != 0) {
