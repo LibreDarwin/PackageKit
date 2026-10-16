@@ -179,7 +179,8 @@ build_component_pkg(const char *root, const char *identifier,
 {
 	struct payload pl;
 	memset(&pl, 0, sizeof pl);
-	if (payload_build(root, &pl) != 0) {
+	/* Component/root payloads sanitize ownership to root/0. */
+	if (payload_build(root, &pl, 0) != 0) {
 		fprintf(stderr, "%s: failed to build Payload for %s\n",
 		    program_name, root);
 		return -1;
@@ -193,7 +194,7 @@ build_component_pkg(const char *root, const char *identifier,
 		return -1;
 	}
 
-	size_t install_kbytes = (pl.uncompressed + 1023) / 1024;
+	size_t install_kbytes = pl.install_kbytes;
 	if (install_kbytes == 0)
 		install_kbytes = 1;
 

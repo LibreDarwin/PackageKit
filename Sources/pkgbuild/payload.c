@@ -619,7 +619,7 @@ remove_tree(const char *path)
 }
 
 int
-payload_build(const char *root, struct payload *out)
+payload_build(const char *root, struct payload *out, int preserve_owner)
 {
 	char tmpl[] = "/tmp/pkgbuild-stage.XXXXXX";
 	char *stage = mkdtemp(tmpl);
@@ -663,9 +663,8 @@ payload_build(const char *root, struct payload *out)
 
 	if (run_cpio(stage, &names, &odc) != 0)
 		goto done;
-	/* Scripts preserve the source ownership. */
-	odc_normalize(&odc, &ctx.nlinks, &ctx.uids, &ctx.gids, 1, ctx.grp,
-	    ctx.gkey, ctx.grp_n);
+	odc_normalize(&odc, &ctx.nlinks, &ctx.uids, &ctx.gids, preserve_owner,
+	    ctx.grp, ctx.gkey, ctx.grp_n);
 
 	unsigned char *gz = NULL;
 	size_t gzlen = 0;
@@ -692,7 +691,8 @@ done:
 }
 
 int
-payload_stage(const char *root, char **stage_out, struct payload *out)
+payload_stage(const char *root, char **stage_out, struct payload *out,
+    int preserve_owner)
 {
 	char tmpl[] = "/tmp/pkgbuild-stage.XXXXXX";
 	char *stage = mkdtemp(tmpl);
@@ -736,9 +736,8 @@ payload_stage(const char *root, char **stage_out, struct payload *out)
 
 	if (run_cpio(stage, &names, &odc) != 0)
 		goto done;
-	/* Payload sanitizes ownership to 0/0 ("recommended"). */
-	odc_normalize(&odc, &ctx.nlinks, &ctx.uids, &ctx.gids, 0, ctx.grp,
-	    ctx.gkey, ctx.grp_n);
+	odc_normalize(&odc, &ctx.nlinks, &ctx.uids, &ctx.gids, preserve_owner,
+	    ctx.grp, ctx.gkey, ctx.grp_n);
 
 	unsigned char *gz = NULL;
 	size_t gzlen = 0;

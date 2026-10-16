@@ -12,21 +12,30 @@
  * Generated from a source root directory.
  *   data         - gzip( cpio -o -H odc ) for the root's files
  *   size          - byte length of data
- *   uncompressed  - byte length of the raw cpio (the install size)
- *   file_count    - number of cpio records (dirs + files, incl. "." but
- *                   excluding the TRAILER!!! record)
+ *   uncompressed  - byte length of the raw cpio
+ *   file_count    - number of cpio records (dirs + files + AppleDouble
+ *                   sidecars, incl. "." but excluding the TRAILER!!! record)
+ *   install_kbytes- installed size, i.e. ceil(sum over non-root entries of
+ *                   roundup(st_size, 512) / 1024), as pkgbuild reports it
  */
 struct payload {
 	unsigned char *data;
 	size_t size;
 	size_t uncompressed;
 	int file_count;
+	size_t install_kbytes;
 };
 
 /*
  * Walk root, delegate the cpio(1) copy-out (-o -H odc) and gzip the result
  * with zlib. Returns 0 on success (-1 on failure), filling *out.
+ *
+ * preserve_owner selects the recorded uid/gid: 0 sanitizes ownership to
+ * root/0 ("recommended", as a root Payload does), non-zero preserves the
+ * source ownership (as the Scripts archive does).
  */
-int payload_build(const char *root, struct payload *out);
+int payload_build(const char *root, struct payload *out, int preserve_owner);
+int payload_stage(const char *root, char **stage_out, struct payload *out,
+    int preserve_owner);
 
 #endif /* PAYLOAD_H */

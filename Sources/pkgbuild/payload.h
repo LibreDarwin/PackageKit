@@ -29,8 +29,13 @@ struct payload {
 /*
  * Walk root, delegate the cpio(1) copy-out (-o -H odc) and gzip the result
  * with zlib. Returns 0 on success (-1 on failure), filling *out.
+ *
+ * preserve_owner selects the recorded uid/gid: 0 sanitizes ownership to
+ * root/0 ("recommended", as a root Payload does), non-zero preserves the
+ * source ownership (as the Scripts archive does).
  */
-int payload_build(const char *root, struct payload *out);
-int payload_stage(const char *root, char **stage_out, struct payload *out);
+int payload_build(const char *root, struct payload *out, int preserve_owner);
+int payload_stage(const char *root, char **stage_out, struct payload *out,
+    int preserve_owner);
 
 #endif /* PAYLOAD_H */

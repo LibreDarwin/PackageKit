@@ -222,7 +222,7 @@ main(int argc, char **argv)
 	/* Build the payload (cpio/odc + gzip) and BOM from staged tree. */
 	struct payload pl;
 	char *stage_dir = NULL;
-	if (payload_stage(src, &stage_dir, &pl) != 0) {
+	if (payload_stage(src, &stage_dir, &pl, 0) != 0) {
 		fprintf(stderr, "%s: failed to build Payload\n", program_name);
 		bundles_free(bundles);
 		return 1;
@@ -299,7 +299,7 @@ main(int argc, char **argv)
 	struct payload scripts;
 	scripts.data = NULL;
 	if (scripts_dir != NULL) {
-		if (payload_build(scripts_dir, &scripts) == 0) {
+		if (payload_build(scripts_dir, &scripts, 1) == 0) {
 			entries[2].name = "Scripts";
 			entries[2].encoding = "application/octet-stream";
 			entries[2].compressed = 0;
