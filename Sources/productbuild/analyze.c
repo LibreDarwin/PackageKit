@@ -12,8 +12,27 @@
 #include <limits.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 
 #include "analyze.h"
+
+/*
+ * Reproduce Apple's generator-version attribute.  InstallCmds embeds its
+ * marketing version ("864.12") and the running OS build (from
+ * kern.osversion, e.g. "25F84"), yielding "InstallCmds-864.12 (25F84)".
+ */
+static void
+generator_version(char *buf, size_t n)
+{
+	static const char ident[] = "productbuild-864.12";
+	const char *dash = strrchr(ident, '-');
+	double v = dash ? strtod(dash + 1, NULL) : 0.0;
+	char osver[64] = "";
+	size_t len = sizeof osver;
+	if (sysctlbyname("kern.osversion", osver, &len, NULL, 0) != 0)
+		osver[0] = '\0';
+	snprintf(buf, n, "InstallCmds-%g (%s)", v, osver);
+}
 
 static int
 aprintf(char **out, const char *fmt, ...)
@@ -98,11 +117,20 @@ collect_scripts(const char *scripts_dir, char **scripts_xml)
 
 char *
 pkginfo_build(const char *identifier, const char *version,
-    const char *install_location, const char *scripts_dir,
+    const char *install_location, int content_mode, const char *scripts_dir,
     int number_of_files, size_t install_kbytes, size_t *out_len)
 {
+	char gen[128];
+	generator_version(gen, sizeof gen);
+
+	/* --content packages announce themselves as in-app content and carry
+	 * no install location; otherwise a non-NULL install location becomes
+	 * the install-location attribute. */
 	char loc_attr[512];
-	if (install_location != NULL)
+	if (content_mode)
+		snprintf(loc_attr, sizeof loc_attr,
+		    " content-type=\"in-app\"");
+	else if (install_location != NULL)
 		snprintf(loc_attr, sizeof loc_attr,
 		    " install-location=\"%s\"", install_location);
 	else
@@ -111,15 +139,13 @@ pkginfo_build(const char *identifier, const char *version,
 	char *head = NULL;
 	if (aprintf(&head,
 	    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
-	    "<pkg-info overwrite-permissions=\"true\" relocatable=\"%s\" "
+	    "<pkg-info overwrite-permissions=\"true\" relocatable=\"false\" "
 	    "identifier=\"%s\" postinstall-action=\"none\" version=\"%s\" "
-	    "format-version=\"2\" generator-version=\"pkgbuild-devel\" "
-	    "auth=\"root\"%s>\n"
+	    "format-version=\"2\" generator-version=\"%s\"%s auth=\"root\">\n"
 	    "    <payload numberOfFiles=\"%d\" installKBytes=\"%zu\"/>\n",
-	    install_location ? "false" : "true",
 	    identifier ? identifier : "com.apple.unknown",
-	    version ? version : "1.0",
-	    loc_attr,
+	    version ? version : "0",
+	    gen, loc_attr,
 	    number_of_files > 0 ? number_of_files : 1,
 	    install_kbytes) < 0 || head == NULL)
 		return NULL;
@@ -139,7 +165,7 @@ pkginfo_build(const char *identifier, const char *version,
 	    "    <strict-identifier/>\n"
 	    "    <relocate/>\n"
 	    "%s"
-	    "</pkg-info>\n", scripts_xml ? scripts_xml : "") < 0 || tail == NULL) {
+	    "</pkg-info>", scripts_xml ? scripts_xml : "") < 0 || tail == NULL) {
 		free(head);
 		free(scripts_xml);
 		return NULL;

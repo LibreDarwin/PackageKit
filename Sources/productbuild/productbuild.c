@@ -3,8 +3,10 @@
  *
  * Builds pkgutil-valid product archives (.pkg) that wrap component
  * packages inside a xar archive alongside a synthesized Distribution
- * XML file. The xar(1) system tool is used for archive assembly (same
- * delegation pattern as pkgbuild uses cpio(1)/mkbom(1)).
+ * XML file. Archive assembly uses the bundled xar writer (xar.c) and the
+ * component's Bom/Payload/PackageInfo are produced natively (bomlib +
+ * payload.c); the remaining modes that read an existing Distribution or
+ * --package still delegate to the system xar(1).
  *
  * Five modes, mirroring Apple's tool:
  *
@@ -170,7 +172,7 @@ sign_package(const char *path, const char *identity)
 
 static int
 build_component_pkg(const char *root, const char *identifier,
-    const char *version, const char *install_location,
+    const char *version, const char *install_location, int content_mode,
     const char *scripts_dir,
     unsigned char **out_bom, size_t *out_bom_len,
     struct payload *out_pl,
@@ -200,7 +202,7 @@ build_component_pkg(const char *root, const char *identifier,
 
 	size_t pi_len = 0;
 	char *pkginfo = pkginfo_build(identifier, version, install_location,
-	    scripts_dir, pl.file_count, install_kbytes, &pi_len);
+	    content_mode, scripts_dir, pl.file_count, install_kbytes, &pi_len);
 	if (pkginfo == NULL) {
 		fprintf(stderr, "%s: failed to build PackageInfo\n", program_name);
 		free(pl.data);
@@ -224,49 +226,69 @@ assemble_product(const char *dist_data, size_t dist_len,
     unsigned char *bom_data, size_t bom_len,
     unsigned char *payload_data, size_t payload_len,
     char *pkginfo_data, size_t pkginfo_len,
-    const char *out, const char *sign_identity)
+    const char *pkg_dir, const char *out, const char *sign_identity)
 {
-	/* Build the xar archive with:
-	 *   root.pkg/           (directory entry)
-	 *   root.pkg/Bom        (file, zlib-compressed)
-	 *   root.pkg/Payload    (file, stored raw — already gzip'd by payload.c)
-	 *   root.pkg/PackageInfo (file, zlib-compressed)
-	 *   Distribution        (file, zlib-compressed)
+	/* Entries are supplied in depth-first pre-order (this fixes their ids):
+	 *   <id>.pkg/            (directory, synthetic all-zero metadata)
+	 *     Bom                (file, zlib-compressed, on-disk metadata)
+	 *     Payload            (file, stored raw — already gzip'd by payload.c)
+	 *     PackageInfo        (file, zlib-compressed, no metadata)
+	 *   Distribution         (top-level file, zlib-compressed, no metadata)
 	 */
 	int nent = 5;
 	struct xar_entry *entries = calloc((size_t)nent, sizeof(*entries));
 	if (entries == NULL)
 		return -1;
 
-	entries[0].name = "root.pkg";
+	entries[0].name = pkg_dir;
 	entries[0].is_dir = 1;
+	entries[0].parent = -1;
+	entries[0].mode = 0700;
+	entries[0].uid = 0;
+	entries[0].gid = 0;
+	snprintf(entries[0].user, sizeof entries[0].user, "root");
+	snprintf(entries[0].group, sizeof entries[0].group, "wheel");
 
-	entries[1].name = "root.pkg/Bom";
+	entries[1].name = "Bom";
 	entries[1].encoding = "application/x-gzip";
-	entries[1].data = bom_data;
-	entries[1].size = bom_len;
 	entries[1].compressed = 1;
+	entries[1].parent = 0;
+	if (xar_entry_set_data_file(&entries[1], bom_data, bom_len) != 0) {
+		fprintf(stderr, "%s: failed to stage Bom\n", program_name);
+		free(entries);
+		return -1;
+	}
 
-	entries[2].name = "root.pkg/Payload";
+	entries[2].name = "Payload";
 	entries[2].encoding = "application/octet-stream";
-	entries[2].data = payload_data;
-	entries[2].size = payload_len;
 	entries[2].compressed = 0;
+	entries[2].parent = 0;
+	if (xar_entry_set_data_file(&entries[2], payload_data,
+	    payload_len) != 0) {
+		fprintf(stderr, "%s: failed to stage Payload\n", program_name);
+		xar_entry_free_meta(&entries[1]);
+		free(entries);
+		return -1;
+	}
 
-	entries[3].name = "root.pkg/PackageInfo";
+	entries[3].name = "PackageInfo";
 	entries[3].encoding = "application/x-gzip";
 	entries[3].data = pkginfo_data;
 	entries[3].size = pkginfo_len;
 	entries[3].compressed = 1;
+	entries[3].parent = 0;
 
 	entries[4].name = "Distribution";
 	entries[4].encoding = "application/x-gzip";
 	entries[4].data = dist_data;
 	entries[4].size = dist_len;
 	entries[4].compressed = 1;
+	entries[4].parent = -1;
 
 	size_t arch_len = 0;
 	unsigned char *arch = xar_build(entries, nent, &arch_len);
+	xar_entry_free_meta(&entries[1]);
+	xar_entry_free_meta(&entries[2]);
 	free(entries);
 
 	if (arch == NULL) {
@@ -300,7 +322,7 @@ static int build_from_distribution(const char *dist_path,
 static int
 build_root(const char *root, const char *install_path,
     const char *identifier, const char *version, const char *scripts_dir,
-    const char *out, const char *sign_identity)
+    int content_mode, const char *out, const char *sign_identity)
 {
 	unsigned char *bom = NULL;
 	size_t bom_len = 0;
@@ -309,17 +331,28 @@ build_root(const char *root, const char *install_path,
 	size_t pkginfo_len = 0;
 	size_t install_kbytes = 0;
 
-	if (build_component_pkg(root,
-	    identifier ? identifier : "com.apple.unknown",
-	    version ? version : "1.0", install_path, scripts_dir,
-	    &bom, &bom_len, &pl, &pkginfo, &pkginfo_len,
+	/* With no --identifier, productbuild derives the component identifier
+	 * from the base name of the root directory (e.g. /path/to/root ->
+	 * "root"); the component package is <identifier>.pkg.  The default
+	 * component version is "0". */
+	const char *id = identifier;
+	if (id == NULL || *id == '\0') {
+		const char *base = strrchr(root, '/');
+		id = base ? base + 1 : root;
+	}
+	const char *ver = version ? version : "0";
+
+	char pkg_dir[PATH_MAX];
+	snprintf(pkg_dir, sizeof pkg_dir, "%s.pkg", id);
+
+	if (build_component_pkg(root, id, ver, install_path, content_mode,
+	    scripts_dir, &bom, &bom_len, &pl, &pkginfo, &pkginfo_len,
 	    &install_kbytes) != 0)
 		return 1;
 
 	char *dist = NULL;
 	size_t dist_len = 0;
-	dist = dist_synthesize(identifier ? identifier : "com.apple.unknown",
-	    version ? version : "1.0", "root.pkg", install_path,
+	dist = dist_synthesize(id, ver, pkg_dir, install_path,
 	    install_kbytes, NULL, &dist_len);
 	if (dist == NULL) {
 		fprintf(stderr, "%s: failed to synthesize Distribution\n",
@@ -331,7 +364,7 @@ build_root(const char *root, const char *install_path,
 	}
 
 	int rc = assemble_product(dist, dist_len, bom, bom_len,
-	    pl.data, pl.size, pkginfo, pkginfo_len, out, sign_identity);
+	    pl.data, pl.size, pkginfo, pkginfo_len, pkg_dir, out, sign_identity);
 
 	free(dist);
 	free(pkginfo);
@@ -481,8 +514,8 @@ main(int argc, char **argv)
 	/* Mode 3: --content <output> */
 	if (content != NULL) {
 		out = argv[optind];
-		int rc = build_root(content, "/", identifier,
-		    version ? version : "1.0", scripts_dir, out, sign_identity);
+		int rc = build_root(content, NULL, identifier,
+		    version, scripts_dir, 1, out, sign_identity);
 		pkg_list_free(&pkgs);
 		return rc;
 	}
@@ -496,21 +529,21 @@ main(int argc, char **argv)
 			out_path = argv[optind + 1];
 		}
 		int rc = build_root(component, install_path, identifier,
-		    version ? version : "1.0", scripts_dir, out_path, sign_identity);
+		    version, scripts_dir, 0, out_path, sign_identity);
 		pkg_list_free(&pkgs);
 		return rc;
 	}
 
 	/* Mode 1: --root <install-path> <output> */
 	if (root != NULL) {
-		const char *install_path = "/";
+		const char *install_path = NULL;
 		const char *out_path = argv[optind];
 		if (optind + 1 < argc) {
 			install_path = argv[optind];
 			out_path = argv[optind + 1];
 		}
 		int rc = build_root(root, install_path, identifier,
-		    version ? version : "1.0", scripts_dir, out_path, sign_identity);
+		    version, scripts_dir, 0, out_path, sign_identity);
 		pkg_list_free(&pkgs);
 		return rc;
 	}

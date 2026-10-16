@@ -13,10 +13,12 @@
  * the standard empty bundle/upgrade/atomic/strict/relocate placeholders.
  * If scripts_dir is non-NULL and contains preinstall/postinstall scripts,
  * a <scripts> element is emitted listing them.
+ * When content_mode is set (productbuild --content) the record carries
+ * content-type="in-app" instead of install-location.
  * Returns a malloc'd NUL-terminated string; sets *out_len (excl. NUL).
  */
 char *pkginfo_build(const char *identifier, const char *version,
-    const char *install_location, const char *scripts_dir,
+    const char *install_location, int content_mode, const char *scripts_dir,
     int number_of_files, size_t install_kbytes, size_t *out_len);
 
 #endif /* ANALYZE_H */

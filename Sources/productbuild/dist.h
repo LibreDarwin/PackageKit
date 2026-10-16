@@ -10,12 +10,14 @@
 /*
  * Synthesize an installer-gui-script Distribution XML for a product
  * archive. This mirrors the XML that Apple's productbuild generates when
- * you don't pass --distribution.
+ * you don't pass --distribution.  `identifier` names the component and is
+ * used for every pkg-ref/choice id; `pkg_file` is the archive member path
+ * referenced by the final "#..." pkg-ref.
  *
  * Returns a malloc'd string (caller frees); sets *out_len (excl. NUL).
  */
 char *dist_synthesize(const char *identifier, const char *version,
-    const char *pkg_name, const char *install_location,
+    const char *pkg_file, const char *install_location,
     size_t install_kbytes, const char *host_arch, size_t *out_len);
 
 #endif /* DIST_H */
