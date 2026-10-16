@@ -650,26 +650,11 @@ bm_pkg_build(const char *root, size_t *out_len)
 	qsort(dorder, n, sizeof(*dorder), cmp_dfs);
 	qsort(porder, n, sizeof(*porder), cmp_paths);
 
-	/* Breadth-first (discovery) rank of every entry: root first, then each
-	 * node's children in ascending pid order.  This is the HLIndex sort key. */
-	{
-		uint32_t *q = malloc(n ? n * sizeof(uint32_t) : 1);
-		uint32_t qh = 0, qt = 0, z, rank = 0;
-		if (q == NULL)
-			goto done;
-		q[qt++] = 0;	/* root entry */
-		for (i = 0; i < n; i++)
-			ents[i].br = 0;
-		while (qh < qt) {
-			uint32_t cur = q[qh++];
-			uint32_t pid = ents[cur].pid;
-			ents[cur].br = rank++;
-			for (z = 1; z < n; z++)
-				if (ents[z].parent == pid && z != cur)
-					q[qt++] = z;
-		}
-		free(q);
-	}
+	/* HLIndex sort key: the entry (discovery) order, i.e. pid - 1.  Oracle
+	 * lists HLIndex leaves in exactly the order entries were scanned, not in
+	 * breadth-first rank order. */
+	for (i = 0; i < n; i++)
+		ents[i].br = i;
 
 	/* Build both tree layout plans up front.  The Paths tree is keyed by
 	 * (parent,name) and inserted in path (pid) order; the HLIndex tree is
