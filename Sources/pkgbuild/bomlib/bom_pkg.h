@@ -14,6 +14,6 @@
  * the same block layout, dense free-list allocator and commit protocol as
  * Apple's Bom.framework.  Returns a malloc'd buffer (caller frees) or NULL.
  */
-unsigned char *bm_pkg_build(const char *root, size_t *out_len);
+unsigned char *bm_pkg_build(const char *root, size_t *out_len, int component_mode);
 
 #endif /* BOM_PKG_H */

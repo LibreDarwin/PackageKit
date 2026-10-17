@@ -312,7 +312,7 @@ static int
 build_component_pkg(const char *root, const char *identifier,
     const char *version, const char *install_location, int content_mode,
     const char *scripts_dir, const struct bundle_components *bundles,
-    int component_mode,
+    int component_mode, const struct stat *payload_root_st,
     unsigned char **out_bom, size_t *out_bom_len,
     struct payload *out_pl,
     char **out_pkginfo, size_t *out_pkginfo_len,
@@ -321,14 +321,14 @@ build_component_pkg(const char *root, const char *identifier,
 	struct payload pl;
 	memset(&pl, 0, sizeof pl);
 	/* Component/root payloads sanitize ownership to root/0. */
-	if (payload_build(root, &pl, 0) != 0) {
+	if (payload_build(root, &pl, 0, payload_root_st) != 0) {
 		fprintf(stderr, "%s: failed to build Payload for %s\n",
 		    program_name, root);
 		return -1;
 	}
 
 	size_t bom_len = 0;
-	unsigned char *bom = bom_build(root, &bom_len);
+	unsigned char *bom = bom_build(root, &bom_len, component_mode);
 	if (bom == NULL) {
 		fprintf(stderr, "%s: failed to build BOM\n", program_name);
 		free(pl.data);
@@ -493,6 +493,25 @@ build_root(const char *root, const char *install_path,
 		src = stage;
 	}
 
+	/* --component archives around the bundle wrapper, so the Payload
+	 * root (".") records the metadata of the bundle's enclosing
+	 * directory rather than the staging directory's. */
+	struct stat root_st;
+	const struct stat *payload_root_st = NULL;
+	if (component_mode) {
+		char parent[PATH_MAX];
+		snprintf(parent, sizeof parent, "%s", root);
+		char *slash = strrchr(parent, '/');
+		if (slash == NULL)
+			snprintf(parent, sizeof parent, ".");
+		else if (slash == parent)
+			slash[1] = '\0';
+		else
+			*slash = '\0';
+		if (stat(parent, &root_st) == 0)
+			payload_root_st = &root_st;
+	}
+
 	struct bundle_components *bundles = bundles_for_root(src);
 
 	/* With no --identifier, a component derives its identifier from the
@@ -539,8 +558,8 @@ build_root(const char *root, const char *install_path,
 	snprintf(pkg_dir, sizeof pkg_dir, "%s.pkg", id);
 
 	if (build_component_pkg(src, id, ver, install_path, content_mode,
-	    scripts_dir, bundles, component_mode, &bom, &bom_len, &pl, &pkginfo,
-	    &pkginfo_len, &install_kbytes) != 0) {
+	    scripts_dir, bundles, component_mode, payload_root_st, &bom, &bom_len,
+	    &pl, &pkginfo, &pkginfo_len, &install_kbytes) != 0) {
 		free(id_owned);
 		free(ver_owned);
 		free(title_owned);

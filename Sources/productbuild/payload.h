@@ -7,6 +7,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/stat.h>
 
 /*
  * Generated from a source root directory.
@@ -33,8 +34,14 @@ struct payload {
  * preserve_owner selects the recorded uid/gid: 0 sanitizes ownership to
  * root/0 ("recommended", as a root Payload does), non-zero preserves the
  * source ownership (as the Scripts archive does).
+ *
+ * root_st, when non-NULL, supplies the metadata recorded for the walk root
+ * (".") in place of lstat(root).  productbuild --component archives the
+ * bundle's enclosing directory, so the "." record carries that directory's
+ * mode/nlink/times rather than the temporary staging directory's.
  */
-int payload_build(const char *root, struct payload *out, int preserve_owner);
+int payload_build(const char *root, struct payload *out, int preserve_owner,
+    const struct stat *root_st);
 int payload_stage(const char *root, char **stage_out, struct payload *out,
     int preserve_owner);
 

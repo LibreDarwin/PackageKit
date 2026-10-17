@@ -150,6 +150,7 @@ basename_of(const char *relpath)
 struct stage_ctx {
 	const char *root;
 	const char *stage;
+	const struct stat *root_st;	/* metadata for "." (NULL => lstat) */
 	struct svec *names;
 	struct svec nlinks;	/* octal link count per name, same order */
 	struct svec uids;	/* octal source uid per name, same order */
@@ -285,12 +286,18 @@ stage_entry(struct stage_ctx *ctx, const char *relpath)
 	if (lstat(src, &st) != 0)
 		return;		/* ignore vanished entries */
 
+	/* The --component walk root records the enclosing directory's
+	 * metadata (productbuild archives around the bundle), not the
+	 * staging directory's. */
+	if (relpath[0] == 0 && ctx->root_st != NULL)
+		st = *ctx->root_st;
+
 	const char *disp = relpath[0] ? relpath : ".";
 
 	if (S_ISDIR(st.st_mode)) {
-		if (mkdir(dst, st.st_mode & 0777) != 0 && errno != EEXIST)
+		if (mkdir(dst, st.st_mode & 07777) != 0 && errno != EEXIST)
 			goto fail;
-		if (chmod(dst, st.st_mode & 0777) != 0)
+		if (chmod(dst, st.st_mode & 07777) != 0)
 			goto fail;
 	} else if (S_ISLNK(st.st_mode)) {
 		char target[PATH_MAX];
@@ -619,7 +626,8 @@ remove_tree(const char *path)
 }
 
 int
-payload_build(const char *root, struct payload *out, int preserve_owner)
+payload_build(const char *root, struct payload *out, int preserve_owner,
+    const struct stat *root_st)
 {
 	char tmpl[] = "/tmp/productbuild-stage.XXXXXX";
 	char *stage = mkdtemp(tmpl);
@@ -637,6 +645,7 @@ payload_build(const char *root, struct payload *out, int preserve_owner)
 	struct stage_ctx ctx;
 	ctx.root = root;
 	ctx.stage = stage;
+	ctx.root_st = root_st;
 	ctx.names = &names;
 	ctx.nlinks.v = NULL;
 	ctx.nlinks.n = 0;

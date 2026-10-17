@@ -228,7 +228,7 @@ main(int argc, char **argv)
 		return 1;
 	}
 	size_t bom_len = 0;
-	unsigned char *bom = bom_build(src, &bom_len);
+	unsigned char *bom = bom_build(src, &bom_len, 0);
 	if (bom == NULL) {
 		fprintf(stderr, "%s: failed to build BOM\n", program_name);
 		free(pl.data);

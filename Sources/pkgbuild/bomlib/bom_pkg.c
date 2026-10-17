@@ -514,6 +514,18 @@ cmp_sidecar(const void *pa, const void *pb)
 	return strcmp(a->rel, b->rel);
 }
 
+static void
+cdfs(uint32_t pid, ent *ents, const uint32_t *kids, const uint32_t *koff,
+    uint32_t *ord, uint32_t *po)
+{
+	uint32_t i;
+	for (i = koff[pid]; i < koff[pid + 1]; i++) {
+		uint32_t c = kids[i];
+		ord[(*po)++] = c;
+		cdfs(ents[c].pid, ents, kids, koff, ord, po);
+	}
+}
+
 /* ---- driver ----------------------------------------------------------- */
 
 typedef struct {
@@ -538,7 +550,7 @@ put_var(unsigned char *p, uint32_t nv, const uint32_t *ids, const char **nm)
 }
 
 unsigned char *
-bm_pkg_build(const char *root, size_t *out_len)
+bm_pkg_build(const char *root, size_t *out_len, int component_mode)
 {
 	ent *ents = NULL;
 	uint32_t cap = 64, n = 0, nreal, nside, i;
@@ -584,6 +596,19 @@ bm_pkg_build(const char *root, size_t *out_len)
 	}
 	nreal = n;
 
+	/* component mode: overwrite the root record with the synthetic
+	 * component placeholder (type dir, sidecar flag, zeroed metadata) */
+	if (component_mode) {
+		ents[0].type = 2;
+		ents[0].sidecar = 1;
+		ents[0].mode = 0;
+		ents[0].mtime = 0;
+		ents[0].size = 0;
+		ents[0].cksum = 0;
+		ents[0].lnklen = 0;
+		ents[0].recsize = 31;
+	}
+
 	/* sidecars: every non-root entry carrying xattrs gets a ._ record */
 	{
 		ent *tmp = calloc(nreal, sizeof(*tmp));
@@ -625,6 +650,102 @@ bm_pkg_build(const char *root, size_t *out_len)
 		free(tmp);
 	}
 	n = nreal + nside;
+
+	if (component_mode) {
+		/* Oracle walks the component tree in name-sorted DFS
+		 * pre-order and emits each real entry immediately followed
+		 * by its synthesized AppleDouble sidecar, whereas a plain
+		 * root keeps readdir order and appends every sidecar after
+		 * the real entries. */
+		uint32_t *ord = malloc((size_t)nreal * sizeof(*ord));
+		uint32_t *kids = malloc((size_t)nreal * sizeof(*kids));
+		uint32_t *koff = calloc((size_t)nreal + 2, sizeof(*koff));
+		uint32_t *kcur = calloc((size_t)nreal + 2, sizeof(*kcur));
+		ent *list = malloc((size_t)n * sizeof(*list));
+		uint32_t *remap = calloc((size_t)nreal + 1, sizeof(*remap));
+		uint32_t idx = 0, po = 0;
+		if (ord == NULL || kids == NULL || koff == NULL ||
+		    kcur == NULL || list == NULL || remap == NULL) {
+			free(ord);
+			free(kids);
+			free(koff);
+			free(kcur);
+			free(list);
+			free(remap);
+			goto done;
+		}
+		for (i = 0; i < nreal; i++)
+			kcur[ents[i].parent]++;
+		for (i = 0; i <= nreal; i++) {
+			koff[i] = po;
+			po += kcur[i];
+		}
+		memset(kcur, 0, ((size_t)nreal + 2) * sizeof(*kcur));
+		for (i = 0; i < nreal; i++) {
+			uint32_t p = ents[i].parent;
+			kids[koff[p] + kcur[p]++] = i;
+		}
+		for (i = 0; i <= nreal; i++) {
+			uint32_t a;
+			for (a = koff[i] + 1; a < koff[i + 1]; a++) {
+				uint32_t v = kids[a], k = a;
+				while (k > koff[i] &&
+				    strcmp(ents[kids[k - 1]].name,
+				    ents[v].name) > 0) {
+					kids[k] = kids[k - 1];
+					k--;
+				}
+				kids[k] = v;
+			}
+		}
+		ord[po = 0] = 0;
+		po = 1;
+		cdfs(ents[0].pid, ents, kids, koff, ord, &po);
+		free(kids);
+		free(koff);
+		free(kcur);
+		for (i = 0; i < nreal; i++) {
+			uint32_t j = ord[i];
+			remap[ents[j].pid] = idx + 1;
+			list[idx] = ents[j];
+			list[idx].pid = idx + 1;
+			list[idx].parent = ents[j].parent ?
+			    remap[ents[j].parent] : 0;
+			idx++;
+			if (i == 0)
+				continue;
+			char *abs = path_join(root, ents[j].rel);
+			if (abs == NULL) {
+				free(ord);
+				free(list);
+				free(remap);
+				goto done;
+			}
+			if (has_xattrs(abs)) {
+				ent *e = &list[idx];
+				memset(e, 0, sizeof(*e));
+				e->pid = idx + 1;
+				e->parent = remap[ents[j].parent];
+				e->name = sidecar_name(ents[j].name);
+				e->rel = sidecar_rel(ents[ents[j].parent - 1].rel,
+				    ents[j].name);
+				e->type = 1;
+				e->sidecar = 1;
+				e->mode = ents[j].mode;
+				e->recsize = 31;
+				idx++;
+			}
+			free(abs);
+		}
+		for (i = nreal; i < n; i++) {
+			free(ents[i].name);
+			free(ents[i].rel);
+		}
+		memcpy(ents, list, (size_t)n * sizeof(*list));
+		free(ord);
+		free(list);
+		free(remap);
+	}
 
 	bt.nblocks = 10 + 7 * n;
 	while (pool < bt.nblocks)

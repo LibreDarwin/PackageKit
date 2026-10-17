@@ -11,7 +11,7 @@
 #include "bomlib/bom_pkg.h"
 
 unsigned char *
-bom_build(const char *root, size_t *out_len)
+bom_build(const char *root, size_t *out_len, int component_mode)
 {
-	return bm_pkg_build(root, out_len);
+	return bm_pkg_build(root, out_len, component_mode);
 }
