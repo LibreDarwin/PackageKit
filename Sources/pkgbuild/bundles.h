@@ -39,4 +39,11 @@ struct bundle_components {
 struct bundle_components *bundles_for_root(const char *root);
 void bundles_free(struct bundle_components *b);
 
+/*
+ * Return the title of the bundle at path: its CFBundleDisplayName, else
+ * its CFBundleName, else NULL when the path is not a bundle.  The caller
+ * frees the result.
+ */
+char *bundle_title_for_path(const char *path);
+
 #endif /* BUNDLES_H */

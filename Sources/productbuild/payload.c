@@ -160,6 +160,7 @@ struct stage_ctx {
 	int grp_n;
 	int grp_cap;
 	unsigned long long size_sum;
+	unsigned long long plain_size;
 	int failed;
 };
 
@@ -320,6 +321,12 @@ stage_entry(struct stage_ctx *ctx, const char *relpath)
 		snprintf(name, sizeof name, ".");
 	}
 	ctx->size_sum += ((unsigned long long)st.st_size + 511) / 512 * 512;
+	/* The unpacked size of the archive's contents: the payload's own
+	 * accounting pads every entry to a 512-byte block, a component
+	 * package's installKBytes does not.  The walk root (".") is not
+	 * part of the installed content. */
+	if (relpath[0])
+		ctx->plain_size += (unsigned long long)st.st_size;
 	if (svec_push(ctx->names, name) != 0)
 		goto fail;
 	if (stage_push_nlink(ctx, &st) != 0)
@@ -661,6 +668,7 @@ payload_build(const char *root, struct payload *out, int preserve_owner,
 	ctx.grp_n = 0;
 	ctx.grp_cap = 0;
 	ctx.size_sum = 0;
+	ctx.plain_size = 0;
 	ctx.failed = 0;
 	stage_entry(&ctx, "");
 
@@ -685,6 +693,7 @@ payload_build(const char *root, struct payload *out, int preserve_owner,
 	out->uncompressed = odc.n;
 	out->file_count = names.n;
 	out->install_kbytes = (size_t)(ctx.size_sum / 1024);
+	out->plain_size = ctx.plain_size;
 	rc = 0;
 
 done:
@@ -719,6 +728,7 @@ payload_stage(const char *root, char **stage_out, struct payload *out,
 	struct stage_ctx ctx;
 	ctx.root = root;
 	ctx.stage = stage;
+	ctx.root_st = NULL;
 	ctx.names = &names;
 	ctx.nlinks.v = NULL;
 	ctx.nlinks.n = 0;
@@ -734,6 +744,7 @@ payload_stage(const char *root, char **stage_out, struct payload *out,
 	ctx.grp_n = 0;
 	ctx.grp_cap = 0;
 	ctx.size_sum = 0;
+	ctx.plain_size = 0;
 	ctx.failed = 0;
 	stage_entry(&ctx, "");
 
@@ -758,6 +769,7 @@ payload_stage(const char *root, char **stage_out, struct payload *out,
 	out->uncompressed = odc.n;
 	out->file_count = names.n;
 	out->install_kbytes = (size_t)(ctx.size_sum / 1024);
+	out->plain_size = ctx.plain_size;
 
 	rc = 0;
 

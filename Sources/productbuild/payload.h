@@ -18,6 +18,9 @@
  *                   sidecars, incl. "." but excluding the TRAILER!!! record)
  *   install_kbytes- installed size, i.e. ceil(sum over non-root entries of
  *                   roundup(st_size, 512) / 1024), as pkgbuild reports it
+ *   plain_size    - sum of the non-root entries' st_size without the
+ *                   512-byte block padding, the figure a component
+ *                   package's installKBytes is derived from
  */
 struct payload {
 	unsigned char *data;
@@ -25,6 +28,7 @@ struct payload {
 	size_t uncompressed;
 	int file_count;
 	size_t install_kbytes;
+	unsigned long long plain_size;
 };
 
 /*

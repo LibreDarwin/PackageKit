@@ -170,9 +170,9 @@ dist_synthesize(const char *identifier, const char *version,
 		sbadd(&b, "\"");
 	}
 	sbadd(&b, " visible=\"false\"");
-	/* customLocation is emitted only for a non-root install path;
-	 * installing at "/" needs none. */
-	if (install_location != NULL && strcmp(install_location, "/") != 0) {
+	/* customLocation names the install location whenever one was
+	 * chosen; a location equal to the mode's default needs none. */
+	if (install_location != NULL && *install_location != '\0') {
 		sbadd(&b, " customLocation=\"");
 		xesc(&b, install_location);
 		sbadd(&b, "\"");

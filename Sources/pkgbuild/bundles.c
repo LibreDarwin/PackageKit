@@ -416,6 +416,29 @@ walk_meta(const char *root, const char *rel, int parent, struct mcomps *cs)
 	closedir(d);
 }
 
+/*
+ * Title of a single bundle: its CFBundleDisplayName, else its
+ * CFBundleName, else NULL.  The caller frees the result.
+ */
+char *
+bundle_title_for_path(const char *path)
+{
+	CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL,
+	    (const UInt8 *)path, strlen(path), true);
+	if (url == NULL)
+		return NULL;
+	CFBundleRef bundle = CFBundleCreate(NULL, url);
+	char *title = NULL;
+	if (bundle != NULL) {
+		title = cfdict_string(bundle, CFSTR("CFBundleDisplayName"));
+		if (title == NULL)
+			title = cfdict_string(bundle, CFSTR("CFBundleName"));
+		CFRelease(bundle);
+	}
+	CFRelease(url);
+	return title;
+}
+
 struct bundle_components *
 bundles_for_root(const char *root)
 {

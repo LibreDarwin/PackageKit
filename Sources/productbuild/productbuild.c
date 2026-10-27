@@ -33,12 +33,14 @@
 #include <sys/wait.h>
 
 #include <dirent.h>
+#include <fcntl.h>
 #include "xar.h"
 #include "payload.h"
 #include "bom.h"
 #include "analyze.h"
 #include "dist.h"
 #include "bundles.h"
+#include "hostarch.h"
 
 #define PRODUCTBUILD_VERSION "0.1.0"
 
@@ -205,11 +207,17 @@ normalize_version(const char *v)
 
 /*
  * The human-facing component name (productbuild --component title): the
- * bundle's base name with any ".app" suffix removed.  Caller frees.
+ * bundle's CFBundleDisplayName, else its CFBundleName, else the bundle's
+ * base name with any ".app" suffix removed.  Caller frees.
  */
 static char *
 bundle_title(const char *path)
 {
+	char *title = bundle_title_for_path(path);
+	if (title != NULL && *title != '\0')
+		return title;
+	free(title);
+
 	const char *base = strrchr(path, '/');
 	base = base ? base + 1 : path;
 	size_t len = strlen(base);
@@ -256,6 +264,48 @@ count_real_entries(const char *root)
 }
 
 /*
+ * ditto(1) recreates symlinks, so their timestamps do not survive the
+ * copy.  productbuild(1) keeps the source times for every archived
+ * entry, so walk the source tree and restore the symlink times in the
+ * staged copy.
+ */
+static void
+restore_symlink_times(const char *src, const char *dst)
+{
+	DIR *d = opendir(src);
+	struct dirent *de;
+	char s[PATH_MAX], t[PATH_MAX];
+
+	if (d == NULL)
+		return;
+	while ((de = readdir(d)) != NULL) {
+		struct stat st;
+		struct timespec ts[2];
+
+		if (strcmp(de->d_name, ".") == 0 ||
+		    strcmp(de->d_name, "..") == 0)
+			continue;
+		if (snprintf(s, sizeof s, "%s/%s", src, de->d_name) >=
+		    (int)sizeof s ||
+		    snprintf(t, sizeof t, "%s/%s", dst, de->d_name) >=
+		    (int)sizeof t)
+			continue;
+		if (lstat(s, &st) != 0)
+			continue;
+		if (S_ISLNK(st.st_mode)) {
+			ts[0].tv_sec = st.st_atime;
+			ts[0].tv_nsec = 0;
+			ts[1].tv_sec = st.st_mtime;
+			ts[1].tv_nsec = 0;
+			utimensat(AT_FDCWD, t, ts, AT_SYMLINK_NOFOLLOW);
+		} else if (S_ISDIR(st.st_mode)) {
+			restore_symlink_times(s, t);
+		}
+	}
+	closedir(d);
+}
+
+/*
  * Copy a bundle into a fresh staging dir as <basename> so the component
  * payload/root begins at the bundle wrapper (matching productbuild
  * --component).  Uses ditto(1) to preserve modes, times and xattrs.
@@ -298,6 +348,8 @@ stage_bundle(const char *bundle, char **out_stage)
 		return -1;
 	}
 
+	restore_symlink_times(bundle, dst);
+
 	*out_stage = strdup(stage);
 	if (*out_stage == NULL) {
 		remove_tree(stage);
@@ -336,13 +388,14 @@ build_component_pkg(const char *root, const char *identifier,
 	}
 
 	/* --component packages count real entries (excluding "." and the
-	 * AppleDouble sidecars) and always report 0 installKBytes; plain
-	 * roots count cpio records and report at least 1 KB. */
+	 * AppleDouble sidecars) and report the unpacked size of their
+	 * contents; plain roots count cpio records and report the padded
+	 * block size, at least 1 KB. */
 	int number_of_files;
 	size_t install_kbytes;
 	if (component_mode) {
 		number_of_files = count_real_entries(root);
-		install_kbytes = 0;
+		install_kbytes = (size_t)(pl.plain_size / 1024);
 	} else {
 		number_of_files = pl.file_count;
 		install_kbytes = pl.install_kbytes;
@@ -495,9 +548,12 @@ build_root(const char *root, const char *install_path,
 
 	/* --component archives around the bundle wrapper, so the Payload
 	 * root (".") records the metadata of the bundle's enclosing
-	 * directory rather than the staging directory's. */
+	 * directory rather than the staging directory's.  That enclosing
+	 * directory is also the component's default install location. */
 	struct stat root_st;
 	const struct stat *payload_root_st = NULL;
+	char default_install[PATH_MAX];
+	default_install[0] = '\0';
 	if (component_mode) {
 		char parent[PATH_MAX];
 		snprintf(parent, sizeof parent, "%s", root);
@@ -510,7 +566,13 @@ build_root(const char *root, const char *install_path,
 			*slash = '\0';
 		if (stat(parent, &root_st) == 0)
 			payload_root_st = &root_st;
+		snprintf(default_install, sizeof default_install, "%s", parent);
 	}
+
+	/* A component installs into the directory holding the bundle unless
+	 * the caller names another location. */
+	if (component_mode && (install_path == NULL || *install_path == '\0'))
+		install_path = default_install;
 
 	struct bundle_components *bundles = bundles_for_root(src);
 
@@ -571,10 +633,24 @@ build_root(const char *root, const char *install_path,
 		return 1;
 	}
 
+	/* The Distribution only carries a customLocation when the install
+	 * location differs from the mode's default. */
+	const char *dist_install = install_path;
+	if (component_mode && default_install[0] != '\0' &&
+	    strcmp(install_path, default_install) == 0)
+		dist_install = NULL;
+
+	/* A component package advertises the architectures of the bundle's
+	 * main executable; a plain root keeps the generic default. */
+	char *host_arch = NULL;
+	if (component_mode)
+		host_arch = host_archs_for_bundle(root);
+
 	char *dist = NULL;
 	size_t dist_len = 0;
 	dist = dist_synthesize(id, ver, short_version, title, pkg_dir,
-	    install_path, bundles, install_kbytes, NULL, &dist_len);
+	    dist_install, bundles, install_kbytes, host_arch, &dist_len);
+	free(host_arch);
 	if (dist == NULL) {
 		fprintf(stderr, "%s: failed to synthesize Distribution\n",
 		    program_name);
@@ -759,7 +835,9 @@ main(int argc, char **argv)
 
 	/* Mode 2: --component <install-path> <output> */
 	if (component != NULL) {
-		const char *install_path = "/Applications";
+		/* The install path is optional; without one the component
+		 * installs into the directory holding the bundle. */
+		const char *install_path = NULL;
 		const char *out_path = argv[optind];
 		if (optind + 1 < argc) {
 			install_path = argv[optind];

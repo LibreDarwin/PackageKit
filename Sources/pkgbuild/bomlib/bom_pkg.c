@@ -19,6 +19,7 @@
  */
 
 #include <dirent.h>
+#include <stdio.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -39,6 +40,10 @@ static uint32_t g_hl_leaf[4096], g_hl_nl, g_hl_int;
 #define IDX_SIZE   (4u + 8u * IDX_POOL + 60u)	/* 0x5590 */
 #define MAP_BASE   0x200u
 #define OVFL       0x10000u
+
+static int g_dbg = -1;
+static const char *g_phase = "";
+#define DBG() (g_dbg < 0 ? (g_dbg = getenv("BOMDBG") != NULL) : g_dbg)
 
 #define ID_INFO    1u
 #define ID_PATHS_H 2u
@@ -189,6 +194,8 @@ static void
 fl_push(alloc *a, uint32_t addr, uint32_t size)
 {
 	frec *f;
+	if (DBG())
+		fprintf(stderr, "[%s] PUSH size=%u @%u\n", g_phase, size, addr);
 	if (size == 0)
 		return;
 	if (size >= OVFL) {
@@ -220,6 +227,7 @@ fl_take(alloc *a, uint32_t size)
 		a->buckets[size] = f->next;
 		uint32_t addr = f->addr;
 		free(f);
+		if (DBG()) fprintf(stderr, "[%s] TAKE size=%u @%u (exact)\n", g_phase, size, addr);
 		return addr;
 	}
 	for (s = size + 1; s < OVFL; s++) {
@@ -229,6 +237,7 @@ fl_take(alloc *a, uint32_t size)
 			uint32_t addr = f->addr;
 			free(f);
 			fl_push(a, addr + size, s - size);
+			if (DBG()) fprintf(stderr, "[%s] TAKE size=%u @%u (split from %u)\n", g_phase, size, addr, s);
 			return addr;
 		}
 	}
@@ -245,14 +254,27 @@ fl_take(alloc *a, uint32_t size)
 			free(bf);
 			if (osz > size)
 				fl_push(a, addr + size, osz - size);
+			if (DBG()) fprintf(stderr, "[%s] TAKE size=%u @%u (ovf %u)\n", g_phase, size, addr, osz);
 			return addr;
 		}
 	}
 	{
 		uint32_t addr = a->hi;
 		a->hi += size;
+		if (DBG()) fprintf(stderr, "[%s] TAKE size=%u @%u (bump)\n", g_phase, size, addr);
 		return addr;
 	}
+}
+
+/* The HLIndex tree header block is carved out of the space of the
+ * superseded two-variable table, and that only happens once the tree is
+ * created, i.e. right before the root PathRecord is allocated.  The table
+ * block therefore has to stay live until then. */
+static void
+alloc_hl_header(alloc *a, uint32_t *addr, uint32_t var1_addr, uint32_t var1_len)
+{
+	fl_push(a, var1_addr, var1_len);
+	addr[ID_HL_H] = fl_take(a, 21);
 }
 
 static void
@@ -844,21 +866,26 @@ bm_pkg_build(const char *root, size_t *out_len, int component_mode)
 	A.hi = MAP_BASE;
 	{
 		uint32_t prev = 0, prevsz = 0;
+		int defer_prev = 0;
 #define NAMED(k) do {						\
-		if (prev != 0)					\
-			fl_push(&A, prev, prevsz);		\
-		var_addr[k] = fl_take(&A, varlen[k]);		\
-		prev = var_addr[k];				\
-		prevsz = varlen[k];				\
-	} while (0)
+	if (prev != 0 && !defer_prev)			\
+		fl_push(&A, prev, prevsz);		\
+	var_addr[k] = fl_take(&A, varlen[k]);		\
+	prev = var_addr[k];				\
+	prevsz = varlen[k];				\
+} while (0)
 		NAMED(0);
 		info12 = fl_take(&A, 12);
 		NAMED(1);
 		bt.addr[ID_PATHS_L] = fl_take(&A, 4096);
 		bt.addr[ID_PATHS_H] = fl_take(&A, 21);
+		/* The two-variable table is released later on: the HLIndex
+		 * tree header is allocated from its space when the tree is
+		 * created. */
+		defer_prev = 1;
 		NAMED(2);
+		defer_prev = 0;
 		bt.addr[ID_HL_L] = fl_take(&A, 4096);
-		bt.addr[ID_HL_H] = fl_take(&A, 21);
 		NAMED(3);
 		bt.addr[ID_SZ_L] = fl_take(&A, 128);
 		bt.addr[ID_SZ_H] = fl_take(&A, 21);
@@ -867,6 +894,7 @@ bm_pkg_build(const char *root, size_t *out_len, int component_mode)
 		bt.addr[ID_MT_L] = fl_take(&A, 4096);
 		bt.addr[ID_MT_H] = fl_take(&A, 21);
 #undef NAMED
+
 
 		/* Grow the block table to its final size: fixed ids 1..10, three
 		 * record blocks per entry (ent order), the Paths tree pages, four
@@ -901,6 +929,8 @@ bm_pkg_build(const char *root, size_t *out_len, int component_mode)
 		g_hl_leaf[0] = ID_HL_L;
 		{
 			uint32_t bump = 11, sp = 0, sh = 0;
+			uint32_t root_rec_size = 0;
+			g_phase = "rec";
 			for (i = 0; i < n; i++) {
 				ent *e = &ents[i];
 				e->prblk = bump++;
@@ -910,10 +940,25 @@ bm_pkg_build(const char *root, size_t *out_len, int component_mode)
 				bt.size[e->fileblk] =
 				    4 + (uint32_t)strlen(e->name) + 1;
 				bt.size[e->piiblk] = 8;
-				bt.addr[e->prblk] = fl_take(&A, bt.size[e->prblk]);
-				bt.addr[e->fileblk] =
-				    fl_take(&A, bt.size[e->fileblk]);
-				bt.addr[e->piiblk] = fl_take(&A, 8);
+				/* --component defers the root PathRecord's
+				 * physical block: Apple allocates it right
+				 * after the root's own quad group (see the
+				 * dorder loop below). */
+				if (component_mode && i == 0) {
+					root_rec_size = bt.size[e->prblk];
+					bt.addr[e->fileblk] =
+					    fl_take(&A, bt.size[e->fileblk]);
+					bt.addr[e->piiblk] = fl_take(&A, 8);
+				} else {
+					if (i == 0)
+						alloc_hl_header(&A, bt.addr,
+						    var_addr[1], varlen[1]);
+					bt.addr[e->prblk] =
+					    fl_take(&A, bt.size[e->prblk]);
+					bt.addr[e->fileblk] =
+					    fl_take(&A, bt.size[e->fileblk]);
+					bt.addr[e->piiblk] = fl_take(&A, 8);
+				}
 				/* Tree pages get their ids here (interleaved
 				 * with the records) but are not physically
 				 * allocated until after BomInfo. */
@@ -929,6 +974,7 @@ bm_pkg_build(const char *root, size_t *out_len, int component_mode)
 					sp++;
 				}
 			}
+			g_phase = "quad";
 			for (i = 0; i < n; i++) {
 				ent *e = dorder[i];
 				e->qbase = bump;
@@ -941,6 +987,12 @@ bm_pkg_build(const char *root, size_t *out_len, int component_mode)
 				bt.addr[e->qbase + 0] = fl_take(&A, 21);
 				bt.addr[e->qbase + 2] = fl_take(&A, 4);
 				bt.addr[e->qbase + 3] = fl_take(&A, 4);
+				if (component_mode && i == 0 && root_rec_size != 0) {
+					alloc_hl_header(&A, bt.addr, var_addr[1],
+					    varlen[1]);
+					bt.addr[ents[0].prblk] =
+					    fl_take(&A, root_rec_size);
+				}
 				while (sh < hplan.nsplits &&
 				    hplan.splits[sh].insert == i) {
 					uint32_t cid = hplan.splits[sh].newleaf;
@@ -1169,6 +1221,14 @@ bm_pkg_build(const char *root, size_t *out_len, int component_mode)
 			ent *e = &ents[i];
 			if (e->macho)
 				continue;
+			if (component_mode) {
+				/* component BOMs report the total size of
+				 * every archived entry, directories and
+				 * symlinks included; root BOMs report the
+				 * sum of the plain file sizes only. */
+				plainsize += e->size;
+				continue;
+			}
 			if (!e->sidecar && e->type == 1)
 				fsum += e->size;
 			if (e->size > plainsize)
